@@ -24,13 +24,13 @@ vx_data, vy_data, vz_data = [], [], []
 
 print("กำลังบันทึกข้อมูลตำแหน่ง และ ความเร็ว ของแก้วน้ำ...")
 record_duration = 20  # บันทึกข้อมูลเป็นเวลา 10 วินาที
-start_time = sim.getSimulationTime()
+start_time = sim.getSimulationTime() # 0 second at the start of simulation
 
 # ==========================================
 # 2. ลูปเก็บข้อมูลจาก Simulation
 # ==========================================
 while True:
-    t = sim.getSimulationTime()
+    t = sim.getSimulationTime() # ดึงเวลาปัจจุบันจาก Simulation
     if t - start_time > record_duration:
         break
         
@@ -50,7 +50,8 @@ while True:
     vz_data.append(linear_vel[2])
     
     time.sleep(0.05) # หน่วงเวลาเล็กน้อย
-
+    
+sim.stopSimulation()  # หยุด Simulation หลังจากบันทึกข้อมูลเสร็จ
 # แปลงเป็น numpy array
 t_arr = np.array(time_data)
 x_arr, y_arr, z_arr = np.array(x_data), np.array(y_data), np.array(z_data)
