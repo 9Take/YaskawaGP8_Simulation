@@ -213,4 +213,8 @@ remoteApi.dll       # ไฟล์เชื่อมต่อ CoppeliaSim (Windo
 remoteApi.so        # ไฟล์เชื่อมต่อ CoppeliaSim (Linux)
 *.png               # รูปกราฟที่ Matplotlib เซฟออกมา (ถ้าไม่ต้องการเก็บ)
 
+# --- Additional for Robotics & Sim Patch ---
+yaskawaGP8_group/
+yaskawaSim_tutorials/
+
 # End of https://www.toptal.com/developers/gitignore/api/python,linux,visualstudiocode
