@@ -216,5 +216,7 @@ remoteApi.so        # ไฟล์เชื่อมต่อ CoppeliaSim (Linux
 # --- Additional for Robotics & Sim Patch ---
 yaskawaGP8_group/
 yaskawaSim_tutorials/
+yaskawaGP8_group.zip
+yaskawaSim_tutorials.zip
 
 # End of https://www.toptal.com/developers/gitignore/api/python,linux,visualstudiocode
