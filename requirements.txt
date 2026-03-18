@@ -3,3 +3,4 @@ matplotlib==3.8.3
 sympy==1.12
 coppeliasim-zmqremoteapi-client==2.0.0
 getch
+scipy==1.17.1
