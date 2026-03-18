@@ -1,18 +1,16 @@
 '''
-Scene: yaskawaGP8_linearConveyor.ttt
+Scene: yaskawaGP8_loopConveyor.ttt   ← เปลี่ยนจาก linearConveyor
 
 Description: 
 - get the cup position, velocity and acceleration
 - get the cup orientation roll, pitch and yaw
+- find pick window: ช่วงเวลาที่แก้วอยู่ใน workspace ของแขน
 '''
 
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
-#from zmqRemoteApi import RemoteAPIClient
 import numpy as np
 from mpl_toolkits import mplot3d
 import matplotlib.pyplot as plt
-import threading
-import getch
 import math
 Pi = math.pi
 
@@ -27,8 +25,19 @@ sim.setStepping(True)
 
 sim.startSimulation()
 
-cup=sim.getObject('./Cup')
-cup_acc_sensor = sim.getObject('./Accelerometer')
+# ============================================================
+# แก้ไขจุดที่ 1: ชื่อ object ใน loopConveyor ต่างจาก linearConveyor
+# ดูชื่อจริงใน Scene hierarchy แล้วแก้บรรทัดนี้
+# ============================================================
+cup = sim.getObject('/conveyorSystem/Cup')   # ← แก้ชื่อให้ตรงกับ scene
+
+# accelerometer อาจไม่มีใน loop scene — ถ้า error ให้ comment บรรทัดนี้
+try:
+    cup_acc_sensor = sim.getObject('./Accelerometer')
+    has_accel = True
+except:
+    has_accel = False
+    print("ไม่พบ Accelerometer — ข้ามการอ่าน acceleration")
 
 t = []
 # linear
@@ -43,192 +52,287 @@ cupAy = []
 cupAz = []
 # angular
 cupP_alpha = []
-cupP_beta = []
+cupP_beta  = []
 cupP_gamma = []
 cupV_alpha = []
-cupV_beta = []
+cupV_beta  = []
 cupV_gamma = []
 
-i = 0
-step = 380
-dt = sim.getSimulationTimeStep()
+i    = 0
+# ============================================================
+# แก้ไขจุดที่ 2: เพิ่ม step เป็น 400 ให้ครบ 20 วินาที
+# (loop conveyor ใช้ 400 steps ตาม tutorial slide 37)
+# ============================================================
+step = 400   # ← เปลี่ยนจาก 380 → 400
+dt   = sim.getSimulationTimeStep()
 
 while not sim.getSimulationStopping():
     print('t %d: %.2f sec' % (i, sim.getSimulationTime()))
-    cupPos = sim.getObjectPosition(cup, sim.handle_world)
+    cupPos     = sim.getObjectPosition(cup, sim.handle_world)
     alpha, beta, gamma = sim.getObjectOrientation(cup, sim.handle_world)
     cupL_Vel, cupA_Vel = sim.getObjectVelocity(cup, sim.handle_world)
-    cup_accelX = sim.getFloatSignal("accelerometerX")
-    cup_accelY = sim.getFloatSignal("accelerometerY")
-    cup_accelZ = sim.getFloatSignal("accelerometerZ")
-    # linear
-    print('Cup linear')
-    print('Cup pos %d: x=%.3f, y=%.3f, z=%.3f ' % (i, cupPos[0], cupPos[1], cupPos[2]))
-    print('Cup vel %d: x=%.3f, y=%.3f, z=%.3f ' % (i, cupL_Vel[0], cupL_Vel[1], cupL_Vel[2]))
-    print('Cup acc %d: x=%s, y=%s, z=%s ' % (i, cup_accelX, cup_accelY, cup_accelZ))
-    # angular
-    print('Cup angular')
-    print('Cup angular pos %d: x=%.3f, y=%.3f, z=%.3f ' % (i, alpha, beta, gamma))
-    print('Cup angular vel %d: x=%.3f, y=%.3f, z=%.3f ' % (i, cupA_Vel[0], cupA_Vel[1], cupA_Vel[2]))
-    
-    # get data to list
-    t.append(sim.getSimulationTime())
-    # linear
-    cupPx.append(cupPos[0])
-    cupPy.append(cupPos[1])
-    cupPz.append(cupPos[2])
-    cupVx.append(cupL_Vel[0])
-    cupVy.append(cupL_Vel[1])
-    cupVz.append(cupL_Vel[2])
-    cupAx.append(cup_accelX)
-    cupAy.append(cup_accelY)
-    cupAz.append(cup_accelZ)
-    # angular
-    cupP_alpha.append(alpha)
-    cupP_beta.append(beta)
-    cupP_gamma.append(gamma)
-    cupV_alpha.append(cupA_Vel[0])
-    cupV_beta.append(cupA_Vel[1])
-    cupV_gamma.append(cupA_Vel[2])
-    
-    if i==step:
-        break
-    i = i + 1
-    sim.step()
-    
-print(dt)  
 
-# plot -------------------------------------------------
-plt.figure # plot linear position
+    if has_accel:
+        cup_accelX = sim.getFloatSignal("accelerometerX")
+        cup_accelY = sim.getFloatSignal("accelerometerY")
+        cup_accelZ = sim.getFloatSignal("accelerometerZ")
+    else:
+        cup_accelX = cup_accelY = cup_accelZ = None
+
+    # linear
+    print('Cup pos %d: x=%.4f, y=%.4f, z=%.4f (m)' % (i, cupPos[0], cupPos[1], cupPos[2]))
+    print('Cup vel %d: Vx=%.4f, Vy=%.4f, Vz=%.4f (m/s)' % (i, cupL_Vel[0], cupL_Vel[1], cupL_Vel[2]))
+
+    # store
+    t.append(sim.getSimulationTime())
+    cupPx.append(cupPos[0]);  cupPy.append(cupPos[1]);  cupPz.append(cupPos[2])
+    cupVx.append(cupL_Vel[0]); cupVy.append(cupL_Vel[1]); cupVz.append(cupL_Vel[2])
+    cupAx.append(cup_accelX);  cupAy.append(cup_accelY);  cupAz.append(cup_accelZ)
+    cupP_alpha.append(alpha);  cupP_beta.append(beta);    cupP_gamma.append(gamma)
+    cupV_alpha.append(cupA_Vel[0]); cupV_beta.append(cupA_Vel[1]); cupV_gamma.append(cupA_Vel[2])
+
+    if i == step:
+        break
+    i += 1
+    sim.step()
+
+print(dt)
+
+# ============================================================
+# แก้ไขจุดที่ 3: หา pick window
+# ============================================================
+x_arr  = np.array(cupPx) * 1000
+y_arr  = np.array(cupPy) * 1000
+z_arr  = np.array(cupPz) * 1000
+vx_arr = np.array(cupVx) * 1000
+vy_arr = np.array(cupVy) * 1000
+
+# ฐานหุ่นอยู่ที่ (0, 0) ใน world frame
+robot_x = 0.0
+robot_y = 0.0
+radius_arr = np.sqrt((x_arr - robot_x)**2 + (y_arr - robot_y)**2)
+
+print("\n" + "="*65)
+print("ช่วงพิกัดแก้วจริงใน scene (mm)")
+print("="*65)
+print(f"  x      : min={x_arr.min():.1f}  max={x_arr.max():.1f}")
+print(f"  y      : min={y_arr.min():.1f}  max={y_arr.max():.1f}")
+print(f"  z      : min={z_arr.min():.1f}  max={z_arr.max():.1f}")
+print(f"  radius : min={radius_arr.min():.1f}  max={radius_arr.max():.1f}")
+print(f"  (GP8 workspace: 200-888 mm)")
+
+# 10 step ที่แก้ววิ่งเข้าใกล้หุ่นที่สุด
+print("\n" + "="*75)
+print("10 step ที่แก้ววิ่งเข้าใกล้หุ่นที่สุด (เรียงจากน้อยไปมาก)")
+print("="*75)
+print(f"{'step':>5}  {'t(s)':>6}  {'x(mm)':>8}  {'y(mm)':>8}  {'z(mm)':>8}  {'radius':>8}  {'Vx':>8}  {'Vy':>8}")
+print("-"*75)
+
+sorted_idx = np.argsort(radius_arr)
+for idx in sorted_idx[:10]:
+    print(f"{idx:>5}  {t[idx]:>6.2f}  {x_arr[idx]:>8.1f}  {y_arr[idx]:>8.1f}  "
+          f"{z_arr[idx]:>8.1f}  {radius_arr[idx]:>8.1f}  "
+          f"{vx_arr[idx]:>8.1f}  {vy_arr[idx]:>8.1f}")
+
+# หา pick window: radius 200-888 mm
+pick_candidates = []
+for idx in range(len(t)):
+    r = radius_arr[idx]
+    if 200 < r < 888 and z_arr[idx] > 0:
+        pick_candidates.append({
+            'step': idx, 't': t[idx],
+            'x': x_arr[idx], 'y': y_arr[idx], 'z': z_arr[idx],
+            'vx': vx_arr[idx], 'vy': vy_arr[idx],
+            'radius': r
+        })
+
+if pick_candidates:
+    best = min(pick_candidates, key=lambda c: c['vx']**2 + c['vy']**2)
+    print("\n" + "="*65)
+    print("OK พบ pick window — ใส่ค่านี้ใน test_fixed.py")
+    print("="*65)
+    print(f"px_target = {best['x']:.2f}   # mm")
+    print(f"py_target = {best['y']:.2f}   # mm")
+    print(f"pz_pick   = {best['z']:.2f}   # mm")
+    print(f"pz_hover  = {best['z'] + 250:.2f}   # mm")
+    print(f"# pick ที่ t = {best['t']:.2f} s  (step {best['step']})")
+    print(f"# velocity: Vx={best['vx']:.1f}  Vy={best['vy']:.1f} mm/s")
+    print(f"# radius: {best['radius']:.1f} mm")
+else:
+    closest_idx = sorted_idx[0]
+    print("\n" + "="*65)
+    print("FAIL แก้วไม่เคยเข้า workspace (radius 200-888 mm)")
+    print(f"  radius ใกล้สุด = {radius_arr[closest_idx]:.1f} mm")
+    print(f"  ที่ step={closest_idx}  t={t[closest_idx]:.2f}s")
+    print(f"  x={x_arr[closest_idx]:.1f}  y={y_arr[closest_idx]:.1f}  z={z_arr[closest_idx]:.1f} mm")
+    print("="*65)
+    print("→ conveyor อยู่ไกลเกินไป ต้องย้ายหุ่นใน CoppeliaSim ให้ใกล้ conveyor")
+
+# ============================================================
+# Plots (เหมือนเดิม)
+# ============================================================
+plt.figure()
 
 plt.subplot(2,3,1)
 plt.title('t and linear position x')
-plt.xlabel('t(s)')
-plt.ylabel('m')
-plt.plot(t,cupPx, '--r', label='cup x')
+plt.xlabel('t(s)'); plt.ylabel('m')
+plt.plot(t, cupPx, '--r', label='cup x')
 plt.legend(title='where:')
 
 plt.subplot(2,3,2)
 plt.title('t and linear position y')
-plt.xlabel('t(s)')
-plt.ylabel('m')
-plt.legend()
-plt.plot(t,cupPy, '--r', label='cup y')
+plt.xlabel('t(s)'); plt.ylabel('m')
+plt.plot(t, cupPy, '--r', label='cup y')
 plt.legend(title='where:')
 
 plt.subplot(2,3,3)
 plt.title('t and linear position z')
-plt.xlabel('t(s)')
-plt.ylabel('m')
-plt.legend()
-plt.plot(t,cupPz, '--r', label='cup z')
+plt.xlabel('t(s)'); plt.ylabel('m')
+plt.plot(t, cupPz, '--r', label='cup z')
 plt.legend(title='where:')
 
 plt.subplot(2,3,4)
 plt.title('t and linear velocity x')
-plt.xlabel('t(s)')
-plt.ylabel('m/s')
-plt.legend()
-plt.plot(t,cupVx, '--r', label='cup Vx')
+plt.xlabel('t(s)'); plt.ylabel('m/s')
+plt.plot(t, cupVx, '--r', label='cup Vx')
 plt.legend(title='where:')
 
 plt.subplot(2,3,5)
 plt.title('t and linear velocity y')
-plt.xlabel('t(s)')
-plt.ylabel('m/s')
-plt.legend()
-plt.plot(t,cupVy, '--r', label='cup Vy')
+plt.xlabel('t(s)'); plt.ylabel('m/s')
+plt.plot(t, cupVy, '--r', label='cup Vy')
 plt.legend(title='where:')
 
 plt.subplot(2,3,6)
 plt.title('t and linear velocity z')
-plt.xlabel('t(s)')
-plt.ylabel('m/s')
-plt.legend()
-plt.plot(t,cupVz, '--r', label='cup Vz')
+plt.xlabel('t(s)'); plt.ylabel('m/s')
+plt.plot(t, cupVz, '--r', label='cup Vz')
 plt.legend(title='where:')
 
+plt.tight_layout()
 plt.show()
 
-plt.figure # plot angular position
+# angular plots
+plt.figure()
+titles_pos = ['angular position x','angular position y','angular position z']
+titles_vel = ['angular velocity x','angular velocity y','angular velocity z']
+ang_pos = [cupP_alpha, cupP_beta, cupP_gamma]
+ang_vel = [cupV_alpha, cupV_beta, cupV_gamma]
 
-plt.subplot(2,3,1)
-plt.title('t and angular position x of the cup')
-plt.xlabel('t(s)')
-plt.ylabel('rad')
-plt.legend()
-plt.plot(t,cupP_alpha, '--r')
+for j, (data, title) in enumerate(zip(ang_pos, titles_pos)):
+    plt.subplot(2,3,j+1)
+    plt.title(f't and {title} of the cup')
+    plt.xlabel('t(s)'); plt.ylabel('rad')
+    plt.plot(t, data, '--r')
 
-plt.subplot(2,3,2)
-plt.title('t and angular position y of the cup')
-plt.xlabel('t(s)')
-plt.ylabel('rad')
-plt.legend()
-plt.plot(t,cupP_beta, '--r')
+for j, (data, title) in enumerate(zip(ang_vel, titles_vel)):
+    plt.subplot(2,3,j+4)
+    plt.title(f't and {title} of the cup')
+    plt.xlabel('t(s)'); plt.ylabel('rad/s')
+    plt.plot(t, data, '--r')
 
-plt.subplot(2,3,3)
-plt.title('t and angular position z of the cup')
-plt.xlabel('t(s)')
-plt.ylabel('rad')
-plt.legend()
-plt.plot(t,cupP_gamma, '--r')
-
-plt.subplot(2,3,4)
-plt.title('t and angular velocity x of the cup')
-plt.xlabel('t(s)')
-plt.ylabel('rad/s')
-plt.legend()
-plt.plot(t,cupV_alpha, '--r')
-
-plt.subplot(2,3,5)
-plt.title('t and angular velocity y of the cup')
-plt.xlabel('t(s)')
-plt.ylabel('rad/s')
-plt.legend()
-plt.plot(t,cupV_beta, '--r')
-
-plt.subplot(2,3,6)
-plt.title('t and angular velocity z of the cup')
-plt.xlabel('t(s)')
-plt.ylabel('rad/s')
-plt.legend()
-plt.plot(t,cupV_gamma, '--r')
-
+plt.tight_layout()
 plt.show()
 
-fig = plt.figure() # 3D line plot
- 
-# syntax for 3-D projection
-ax = plt.axes(projection ='3d')
+# 3D plot
+fig = plt.figure()
+ax = plt.axes(projection='3d')
 ax.set_aspect('auto')
 ax.plot3D(cupPx, cupPy, cupPz, 'green')
 ax.set_title('3D line plot the cup (x,y,z)')
-
 plt.show()
 
-plt.figure # acceleration
-plt.subplot(1,3,1)
-plt.title('t and acceleration x of the cup')
-plt.plot(t,cupAx, '--r')
-plt.xlabel('t(s)')
-plt.ylabel('m/s^2')
-plt.legend()
-plt.subplot(1,3,2)
-plt.title('t and acceleration y of the cup')
-plt.plot(t,cupAy, '--r')
-plt.xlabel('t(s)')
-plt.ylabel('m/s^2')
-plt.legend()
-plt.subplot(1,3,3)
-plt.title('t and acceleration z of the cup')
-plt.plot(t,cupAz, '--r')
-plt.xlabel('t(s)')
-plt.ylabel('m/s^2')
-plt.legend()
-plt.show()
+# acceleration plot
+if has_accel and cupAx[0] is not None:
+    plt.figure()
+    for j, (data, title) in enumerate(zip([cupAx, cupAy, cupAz],
+                                           ['x','y','z'])):
+        plt.subplot(1,3,j+1)
+        plt.title(f't and acceleration {title} of the cup')
+        plt.plot(t, data, '--r')
+        plt.xlabel('t(s)'); plt.ylabel('m/s^2')
+    plt.tight_layout()
+    plt.show()
 
-# stop program -----------------------------------------
+# stop
 sim.setStepping(False)
 sim.stopSimulation()
 print('Program ended')
 
+# =========================================
+# Plot EF trajectory vs Cup trajectory
+# =========================================
+import numpy as np
+import matplotlib.pyplot as plt
+
+# จำลอง EF path จาก test_fixed.py
+px_pick  = 639.78
+py_pick  = -515.41
+pz_pick  = 453.25
+pz_hover = 703.25
+cup_vx   = -189.9
+cup_vy   =  52.7
+
+T_hover_arrive = 3.5
+T_wait_end     = 4.55
+T_descend_end  = 5.05
+T_grab_end     = 5.55
+T_lift_end     = 7.0
+
+dt_plot = 0.05
+steps   = 400
+t_plot  = [i * dt_plot for i in range(steps)]
+
+ef_x, ef_y, ef_z = [], [], []
+for t_now in t_plot:
+    if t_now < T_hover_arrive:
+        frac = t_now / T_hover_arrive
+        ex = 0 + frac * px_pick          # สมมติ home x=0
+        ey = 0 + frac * py_pick
+        ez = 600 + frac * (pz_hover-600) # สมมติ home z=600
+    elif t_now < T_wait_end:
+        ex, ey, ez = px_pick, py_pick, pz_hover
+    elif t_now < T_descend_end:
+        dt_e = t_now - T_wait_end
+        dur  = T_descend_end - T_wait_end
+        frac = (t_now - T_wait_end) / dur
+        ex = px_pick + cup_vx * dt_e
+        ey = py_pick + cup_vy * dt_e
+        ez = pz_hover + frac * (pz_pick - pz_hover)
+    elif t_now < T_grab_end:
+        dt_e = t_now - T_wait_end
+        ex = px_pick + cup_vx * dt_e
+        ey = py_pick + cup_vy * dt_e
+        ez = pz_pick
+    elif t_now < T_lift_end:
+        dt_e = t_now - T_wait_end
+        frac = (t_now - T_grab_end) / (T_lift_end - T_grab_end)
+        ex = px_pick + cup_vx * dt_e
+        ey = py_pick + cup_vy * dt_e
+        ez = pz_pick + frac * (pz_hover - pz_pick)
+    else:
+        dt_e = T_lift_end - T_wait_end
+        ex = px_pick + cup_vx * dt_e
+        ey = py_pick + cup_vy * dt_e
+        ez = pz_hover
+    ef_x.append(ex); ef_y.append(ey); ef_z.append(ez)
+
+cup_x_mm = [v*1000 for v in cupPx]
+cup_y_mm = [v*1000 for v in cupPy]
+cup_z_mm = [v*1000 for v in cupPz]
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+for ax, ef, cup, label in zip(
+        axes,
+        [ef_x, ef_y, ef_z],
+        [cup_x_mm, cup_y_mm, cup_z_mm],
+        ['x (mm)', 'y (mm)', 'z (mm)']):
+    ax.plot(t_plot, cup[:steps], '--r', label='cup')
+    ax.plot(t_plot, ef,          '-b',  label='EF target')
+    ax.axvline(T_descend_end, color='g', linestyle=':', label='pick t')
+    ax.axvline(T_grab_end,    color='orange', linestyle=':', label='grab end')
+    ax.set_xlabel('t (s)'); ax.set_ylabel(label)
+    ax.legend(); ax.grid(True)
+plt.suptitle('EF target vs Cup trajectory')
+plt.tight_layout()
+plt.show()

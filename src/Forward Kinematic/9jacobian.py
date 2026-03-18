@@ -45,9 +45,9 @@ dt = 0.05
 t_vals = [i * dt for i in range(step)]
 
 # 🎯 พิกัดเป้าหมายของคุณ (อัปเดตแล้ว)
-px_target = 353.76
-py_target = -515.39
-pz_pick = -639.88
+px_target = 272.36
+py_target = -981.37
+pz_pick = 50.36
 pz_hover = pz_pick + 150.0  # ลอยรอเหนือแก้ว 150 mm
 
 print("กำลังคำนวณหามุมข้อต่อ j1 ถึง j6... (อาจใช้เวลาไม่กี่วินาที)")

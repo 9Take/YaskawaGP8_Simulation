@@ -3,24 +3,24 @@ from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 client = RemoteAPIClient()
 sim = client.require('sim')
 
-# ดึง Handle ของแก้วน้ำและฐานหุ่นยนต์
-cup = sim.getObject('/Cup')
-robot_base = sim.getObject('/yaskawa') # ใช้ตัวฐานของหุ่นเป็นจุดอ้างอิง
+# ดึงชื่อ Handle (ต้องเช็คชื่อใน Scene Hierarchy ของคุณว่าชื่ออะไร)
+cup_handle = sim.getObject('/Cup')          # ชื่อแก้วน้ำ
+robot_base_handle = sim.getObject('/yaskawa') # ชื่อฐานหุ่นยนต์ (ตัวล่างสุดที่ไม่ขยับ)
 
-print("▶️ กำลังเริ่ม Simulation และรอให้สายพานเลื่อนไปที่วินาทีที่ 10.10...")
+print("▶️ เริ่มจำลองเพื่อหาพิกัดที่วินาทีที่ 7.5...")
 sim.startSimulation()
 
-# ปล่อยให้ซิมรันไปเรื่อยๆ จนถึงวินาทีที่เราต้องการหยิบ
-while sim.getSimulationTime() < 5.00:
+# ปล่อยให้สายพานวิ่งไปจนถึงวินาทีที่ 7.5
+while sim.getSimulationTime() < 7.5:
     sim.step()
 
-# ดึงพิกัดแก้วน้ำ "เทียบกับฐานหุ่นยนต์" (ตรงนี้แหละคือคีย์สำคัญ!)
-rel_pos = sim.getObjectPosition(cup, robot_base)
-
-print(f"\n🎯 พิกัดแก้วน้ำที่ถูกต้อง (เทียบกับฐานหุ่นยนต์):")
-print(f"X = {rel_pos[0]*1000:.2f} mm")
-print(f"Y = {rel_pos[1]*1000:.2f} mm")
-print(f"Z = {rel_pos[2]*1000:.2f} mm")
+# 🎯 คำสั่งสำคัญ: หาพิกัดของแก้ว 'เทียบกับ' ฐานหุ่นยนต์
+# (ตัวเลขที่ได้จะมองว่าฐานหุ่นยนต์คือจุด 0,0,0)
+rel_pos = sim.getObjectPosition(cup_handle, robot_base_handle)
 
 sim.stopSimulation()
-print("\n⏹️ สิ้นสุดการค้นหาพิกัด")
+
+print("\n--- พิกัดที่ต้องนำไปใส่ในโค้ด Jacobian ---")
+print(f"px_target = {rel_pos[0]*1000:.2f}") # คูณ 1000 เพื่อแปลงเป็น mm
+print(f"py_target = {rel_pos[1]*1000:.2f}")
+print(f"pz_pick   = {rel_pos[2]*1000:.2f}")
