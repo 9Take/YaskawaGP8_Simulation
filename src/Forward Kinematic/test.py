@@ -1,266 +1,264 @@
-"""
-010243427: INDUSTRIAL MOBILE ROBOTS — Class Project 2/68
-Yaskawa GP8 + Kinova KG-2 Gripper
-Scene: yaskawaGP8_loopConveyor.ttt
-
-Pipeline ตาม tutorial:
-  Step 1: ได้ cup trajectory จาก getCup_trajectory_loop.py
-  Step 2: Design EF trajectory (waypoints + timing)
-  Step 3: Jacobian → joints' trajectory  ← ไฟล์นี้
-  Step 4: Run simulation
-"""
-
-from coppeliasim_zmqremoteapi_client import RemoteAPIClient
+import math as m
 import numpy as np
+import matplotlib.pyplot as plt
+from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
-# ══════════════════════════════════════════════════════════════
-# 1. DH Parameters — Yaskawa GP8 (mm)
-#    verified: FK(q=[0,0,0,0,0,0]) → x≈541, z=715
-#    joint offset: q2_dh = q2_real + 90°
-# ══════════════════════════════════════════════════════════════
-L1, L2, L3, L4 = 330, 345, 40, 40
-L5, L_TOOL     = 340, 161.33
-J_OFFSET = np.array([0, np.pi/2, 0, 0, 0, 0])
+# ==============================================================================
+# 1. SETUP & INITIALIZE
+# ==============================================================================
+print("กำลังเชื่อมต่อกับ CoppeliaSim...")
+client = RemoteAPIClient()
+sim = client.require('sim')
+sim.setStepping(True) 
+
+JOINT_NAMES = ['/yaskawa/joint1', '/yaskawa/joint2', '/yaskawa/joint3',
+               '/yaskawa/joint4', '/yaskawa/joint5', '/yaskawa/joint6']
+joints = [sim.getObject(name) for name in JOINT_NAMES]
+
+mico_motor1 = sim.getObject('/yaskawa/MicoHand/fingers12_motor1')
+mico_motor2 = sim.getObject('/yaskawa/MicoHand/fingers12_motor2')
+
+# เตรียมเก็บข้อมูลเพื่อพล็อตกราฟ Vgripper (Rubric 4.2)
+time_log = []
+vgripper_log = []
+current_vgripper = 0.0
+
+def step_sim():
+    """ฟังก์ชันก้าวเวลาและเก็บข้อมูลกริปเปอร์"""
+    time_log.append(sim.getSimulationTime())
+    vgripper_log.append(current_vgripper)
+    sim.step()
+
+# ==============================================================================
+# 2. INVERSE KINEMATICS ENGINE (Rubric 3)
+# ==============================================================================
+L1, L2, L3, L4, L5, L6, L7 = 330, 345, 40, 40, 340, 80, 161.33
 
 def std_dh(theta, d, a, alpha):
-    ct, st = np.cos(theta), np.sin(theta)
-    ca, sa = np.cos(alpha), np.sin(alpha)
     return np.array([
-        [ct, -st*ca,  st*sa, a*ct],
-        [st,  ct*ca, -ct*sa, a*st],
-        [0,   sa,     ca,    d   ],
-        [0,   0,      0,     1   ]
+        [np.cos(theta), -np.sin(theta)*np.cos(alpha),  np.sin(theta)*np.sin(alpha), a*np.cos(theta)],
+        [np.sin(theta),  np.cos(theta)*np.cos(alpha), -np.cos(theta)*np.sin(alpha), a*np.sin(theta)],
+        [0,              np.sin(alpha),                np.cos(alpha),               d],
+        [0,              0,                            0,                           1]
     ])
 
-def fk(q_real):
-    """FK — q_real คือ joint angles จาก CoppeliaSim (rad)"""
-    q = q_real + J_OFFSET
-    T = np.eye(4)
-    for (th,d,a,al) in [(q[0],L1,L3,np.pi/2),(q[1],0,L2,0),
-                        (q[2],0,L4,np.pi/2),(q[3],L5,0,-np.pi/2),
-                        (q[4],0,0,np.pi/2),(q[5],L_TOOL,0,0)]:
-        T = T @ std_dh(th,d,a,al)
-    return T[:3,3], T[:3,:3]
-
-def jacobian(q_real):
-    """Geometric Jacobian 6x6"""
-    q  = q_real + J_OFFSET
-    Ts = [np.eye(4)]*7
-    params = [(q[0],L1,L3,np.pi/2),(q[1],0,L2,0),
-              (q[2],0,L4,np.pi/2),(q[3],L5,0,-np.pi/2),
-              (q[4],0,0,np.pi/2),(q[5],L_TOOL,0,0)]
-    for i,p in enumerate(params):
-        Ts[i+1] = Ts[i] @ std_dh(*p)
-    P_ee = Ts[6][:3,3]
-    J = np.zeros((6,6))
+def get_jacobian_and_pos(q):
+    pi_half = np.pi / 2
+    T0 = np.eye(4)
+    T1 = T0 @ std_dh(q[0], L1, L3,  pi_half)     
+    T2 = T1 @ std_dh(q[1],  0, L2, 0)          
+    T3 = T2 @ std_dh(q[2],  0, L4, pi_half)    
+    T4 = T3 @ std_dh(q[3], L5,  0, -pi_half)   
+    T5 = T4 @ std_dh(q[4],  0,  0, pi_half)    
+    T6 = T5 @ std_dh(q[5], L6+L7, 0, 0) 
+    P_curr = T6[:3, 3] 
+    J = np.zeros((6, 6))
+    Transforms = [T0, T1, T2, T3, T4, T5]
     for i in range(6):
-        zi = Ts[i][:3,2]; pi = Ts[i][:3,3]
-        J[:3,i] = np.cross(zi, P_ee-pi)
-        J[3:,i] = zi
-    return J
+        Z_i = Transforms[i][:3, 2]
+        P_i = Transforms[i][:3, 3]
+        J[:3, i] = np.cross(Z_i, P_curr - P_i) 
+        J[3:, i] = Z_i                         
+    return J, P_curr
 
-def rot_err(R_cur, R_des):
-    Re = R_des @ R_cur.T
-    return 0.5*np.array([Re[2,1]-Re[1,2],Re[0,2]-Re[2,0],Re[1,0]-Re[0,1]])
+def calculate_ik_angles(target_xyz, initial_angles_deg):
+    """🔥 IK ฉบับ 'กันตาย': ล็อกข้อมือชี้ลงพื้น 100% ป้องกันแขนควงสว่าน"""
+    q_curr = np.radians(initial_angles_deg)
+    target = np.array(target_xyz)
+    
+    for _ in range(500): 
+        # 💡 ยาแรง: ล็อกข้อมือทุกรอบการคำนวณ!
+        # Joint 4 (หมุนข้อมือ) = 0
+        # Joint 5 (พับข้อมือ) = -90 (ชี้ลงพื้นเป๊ะๆ)
+        # Joint 6 (ปลายกริปเปอร์) = 0
+        q_curr[3] = 0.0
+        q_curr[4] = np.radians(-90.0)
+        q_curr[5] = 0.0
+        
+        J, P_curr = get_jacobian_and_pos(q_curr)
+        error = target - P_curr
+        
+        if np.linalg.norm(error) < 1.0: 
+            break # ถ้าแม่นยำระดับ 1 mm แล้วให้หยุด
+            
+        # เราจะใช้ Jacobian แค่ 3 ข้อต่อแรก (J1, J2, J3) มาขยับ XYZ
+        V_cmd = error * 5.0
+        J_pos = J[:3, :3] 
+        
+        lam = 0.2
+        J_dls = J_pos.T @ np.linalg.inv(J_pos @ J_pos.T + (lam**2) * np.eye(3))
+        q_dot = J_dls @ V_cmd
+        
+        # ขยับแค่ 3 ข้อต่อหลัก
+        q_curr[0] += q_dot[0] * 0.05
+        q_curr[1] += q_dot[1] * 0.05
+        q_curr[2] += q_dot[2] * 0.05
+        
+    return np.degrees(q_curr).tolist()
 
-def euler_to_rot(roll, pitch, yaw):
-    Rz = np.array([[np.cos(yaw),-np.sin(yaw),0],[np.sin(yaw),np.cos(yaw),0],[0,0,1]])
-    Ry = np.array([[np.cos(pitch),0,np.sin(pitch)],[0,1,0],[-np.sin(pitch),0,np.cos(pitch)]])
-    Rx = np.array([[1,0,0],[0,np.cos(roll),-np.sin(roll)],[0,np.sin(roll),np.cos(roll)]])
-    return Rz@Ry@Rx
+# ==============================================================================
+# 3. LFPB TRAJECTORY ENGINE (Rubric 2)
+# ==============================================================================
+def lfpb_step(t, q0, qf, tf, tb):
+    if tf == 0: return qf
+    accel = (qf - q0) / (tb * (tf - tb))
+    if 0 <= t <= tb:
+        return q0 + 0.5 * accel * (t**2)
+    elif tb < t <= (tf - tb):
+        return q0 + accel * tb * (t - tb/2)
+    elif (tf - tb) < t <= tf:
+        return qf - 0.5 * accel * (tf - t)**2
+    return qf
 
-# ══════════════════════════════════════════════════════════════
-# 2. Numerical IK Solver (Jacobian DLS)
-#    — คำนวณ joint angles จาก target position+orientation
-# ══════════════════════════════════════════════════════════════
-def solve_ik(p_target, R_target, q_init, max_iter=500, tol=2.0):
-    q = q_init.copy()
-    for it in range(max_iter):
-        p_c, R_c = fk(q)
-        dp = p_target - p_c
-        if np.linalg.norm(dp) < tol: break
-        dr  = rot_err(R_c, R_target)
-        J   = jacobian(q)
-        J_dls = J.T @ np.linalg.inv(J@J.T + 0.5**2*np.eye(6))
-        q   = q + J_dls @ np.concatenate([dp, dr]) * 0.4
-    p_r,_ = fk(q)
-    err   = np.linalg.norm(p_target - p_r)
-    print(f"    IK: err={err:.1f}mm  iter={it+1}  "
-          f"q=[{', '.join(f'{np.degrees(x):.1f}' for x in q)}]°")
-    return q
+def move_lfpb_sync(target_angles, duration):
+    global current_angles
+    start_angles = current_angles.copy()
+    tb = duration * 0.2  
+    start_sim_time = sim.getSimulationTime()
+    
+    while True:
+        elapsed = sim.getSimulationTime() - start_sim_time
+        if elapsed >= duration: break
+        for i in range(6):
+            q_next = lfpb_step(elapsed, start_angles[i], target_angles[i], duration, tb)
+            sim.setJointPosition(joints[i], m.radians(q_next))
+            current_angles[i] = q_next
+        step_sim() # ใช้ฟังก์ชันเก็บข้อมูลกราฟ
+        
+    current_angles = np.array(target_angles)
+    for i in range(6): sim.setJointPosition(joints[i], m.radians(current_angles[i]))
 
-# ══════════════════════════════════════════════════════════════
-# 3. STEP 2 DATA — Waypoints จาก trajectory design
-# ══════════════════════════════════════════════════════════════
-# --- Step 1 output (cup data) ---
-T_PICK   = 5.05              # วินาทีที่แก้วเข้า workspace
-px_pick, py_pick, pz_pick = 639.78, -515.41, 453.25  # mm
-cup_vx,  cup_vy            = -189.9, 52.7             # mm/s
+# ==============================================================================
+# 4. DEFINE TARGETS & CALCULATE IK (หยิบจากด้านบนแบบถูกต้อง 100%)
+# ==============================================================================
+# 📍 พิกัดจุดศูนย์กลางแก้วน้ำที่วินาที 7.5
+CUP_X = 272.25   
+CUP_Y = -561.54  
+CUP_Z = -156.57  
 
-# --- Derived waypoints ---
-HOVER_Z  = pz_pick + 250.0  # 703.25 mm
+# 📏 ชดเชยความยาวกริปเปอร์ในแนวตั้ง (Z-Axis Offset)
+# ถ้ากริปเปอร์ยังจิ้มลึกไป ให้เพิ่มเลขนี้ ถ้าหนีบลอยไป ให้ลดเลขนี้ครับ
+GRIPPER_LENGTH = 160.0 
 
-# hover: back-calc + clamp r=780mm
-T_WAIT   = 4.55
-dt_w2p   = T_PICK - T_WAIT
-px_hraw  = px_pick - cup_vx*dt_w2p
-py_hraw  = py_pick - cup_vy*dt_w2p
-r_raw    = np.sqrt(px_hraw**2 + py_hraw**2)
-sc       = min(1.0, 780.0/r_raw)
-px_hov, py_hov = px_hraw*sc, py_hraw*sc
+# 🎯 เป้าหมายข้อมือ: ให้อยู่จุดเดียวกับแก้ว แต่ "สูงกว่า" เท่ากับความยาวกริปเปอร์!
+PICK_X = CUP_X
+PICK_Y = CUP_Y
+PICK_Z = CUP_Z + GRIPPER_LENGTH  
+HOVER_Z = PICK_Z + 150.0 # ลอยรอเหนือแก้ว 15 ซม.
 
-# place: linear conveyor
-px_pl, py_pl, pz_pl = 500.0, 500.0, 500.0
-PLACE_HOVER_Z = pz_pl + 250.0
+# 📍 เป้าหมายฝั่งวาง (Place) --- สายพานเส้นตรง
+PLACE_CUP_X = -300.0  
+PLACE_CUP_Y = -400.0  
+PLACE_CUP_Z = 0.0     
 
-# Orientations
-angle_to_cup = np.arctan2(py_pick, px_pick)   # -38.9°
-R_pick  = euler_to_rot(np.radians(-135.1), 0.0,           angle_to_cup)
-R_place = euler_to_rot(0.0,               np.radians(90), np.radians(-180))
+# ต้องบวกความสูงกริปเปอร์ตอนวางด้วยเช่นกัน
+PLACE_X = PLACE_CUP_X
+PLACE_Y = PLACE_CUP_Y
+PLACE_Z = PLACE_CUP_Z + GRIPPER_LENGTH
 
-# ══════════════════════════════════════════════════════════════
-# 4. STEP 3 — คำนวณ Joint Angles ด้วย IK (Jacobian)
-# ══════════════════════════════════════════════════════════════
-q_home = np.zeros(6)   # CoppeliaSim home = all joints zero
+print(f"🧠 เป้าหมายข้อมือฝั่ง Pick: X={PICK_X:.1f}, Y={PICK_Y:.1f}, Z={PICK_Z:.1f}")
 
-# q_init ที่เหมาะสม (ใกล้ solution จริง ช่วยให้ IK converge เร็ว)
-q_init_pick  = np.array([np.radians(-36), np.radians(-45),
-                          np.radians(60),  0, np.radians(-75), 0])
-q_init_place = np.array([np.radians(60),  np.radians(-45),
-                          np.radians(60),  0, np.radians(-75), 0])
+# 1. ท่าเริ่มต้นและท่าเตรียมพร้อม
+home_angles = [0.0, 20.0, 20.0, 0.0, -90.0, 0.0] 
+ready_angles = [0.0, 20.0, 20.0, 0.0, -90.0, 0.0]
 
-print("="*55)
-print("STEP 3: Jacobian IK — คำนวณ joint angles")
-print("="*55)
+# คำนวณมุมที่แก้วน้ำอยู่เทียบกับฐาน
+angle_to_pick = m.degrees(m.atan2(PICK_Y, PICK_X))   # จะได้ประมาณ -64 องศา
+angle_to_place = m.degrees(m.atan2(PLACE_Y, PLACE_X)) # จะได้ประมาณ -126 องศา
 
-print("\n[1] Hover (เหนือจุด pick):")
-q_hov = solve_ik(np.array([px_hov, py_hov, HOVER_Z]), R_pick, q_init_pick)
+# ให้คำใบ้ฝั่ง Pick: หันหน้าตรงไปที่แก้ว, ศอกยกขึ้น 40, ข้อมือชี้ลงพื้น -90
+guess_pick_angles = [angle_to_pick, 40.0, -40.0, 0.0, -90.0, 0.0] 
+pick_approach_angles = calculate_ik_angles([PICK_X, PICK_Y, HOVER_Z], guess_pick_angles)
+pick_angles          = calculate_ik_angles([PICK_X, PICK_Y, PICK_Z], pick_approach_angles)
 
-print("\n[2] Pick (ระดับแก้ว):")
-q_pck = solve_ik(np.array([px_pick, py_pick, pz_pick]), R_pick, q_hov)
+# ให้คำใบ้ฝั่ง Place: หันหน้าไปที่สายพานตรง
+guess_place_angles = [angle_to_place, 40.0, -40.0, 0.0, -90.0, 0.0]
+place_approach_angles = calculate_ik_angles([PLACE_X, PLACE_Y, HOVER_Z], guess_place_angles)
+place_angles          = calculate_ik_angles([PLACE_X, PLACE_Y, PLACE_Z], place_approach_angles)
 
-print("\n[3] Place hover:")
-q_plh = solve_ik(np.array([px_pl, py_pl, PLACE_HOVER_Z]), R_place, q_init_place)
+print("✅ คำนวณเสร็จสิ้น! ล็อกพิกัดไม่ให้แขนสวิงมั่วแล้ว")
 
-print("\n[4] Place:")
-q_pl  = solve_ik(np.array([px_pl, py_pl, pz_pl]), R_place, q_plh)
-
-# ══════════════════════════════════════════════════════════════
-# 5. STEP 3 — Generate joint trajectory arrays (tutorial slide 19)
-#    t, j1, j2, j3, j4, j5, j6, gripper — ทุก dt=0.05s
-# ══════════════════════════════════════════════════════════════
-dt   = 0.05
-N    = 400   # 20 วินาที
-t_arr = [i*dt for i in range(N)]
-
-# LFPB interpolation
-def lfpb(t, q0, qf, tf, tb=None):
-    if tb is None: tb = tf*0.2
-    if tf < 1e-9:  return qf
-    a = (qf-q0)/(tb*(tf-tb))
-    if   t <= 0:       return q0
-    elif t <= tb:      return q0 + 0.5*a*t**2
-    elif t <= tf-tb:   return q0 + a*tb*(t-tb/2)
-    elif t <= tf:      return qf - 0.5*a*(tf-t)**2
-    else:              return qf
-
-def interp_q(t_now, t0, t1, qa, qb):
-    """LFPB interpolate ระหว่าง qa→qb ในช่วง [t0,t1]"""
-    if t_now <= t0: return qa.copy()
-    if t_now >= t1: return qb.copy()
-    dur = t1 - t0
-    return np.array([lfpb(t_now-t0, qa[i], qb[i], dur) for i in range(6)])
-
-# Timing
-T0  = 0.0    # home
-T1  = 3.5    # → hover
-T2  = T_WAIT # → เริ่มลง
-T3  = T_PICK # → pick (grab)
-T4  = 5.55   # → lift
-T5  = 7.0    # → hover สิ้นสุด
-T6  = 10.0   # → place hover
-T7  = 11.5   # → place
-T8  = 12.5   # → lift
-T9  = 16.0   # → home
-
-# Gripper velocity (tutorial slide 21)
-V_OPEN  =  0.04   # m/s เปิด
-V_CLOSE = -0.04   # m/s ปิด (จับแก้ว)
-V_HOLD  = -0.04   # m/s ถือแก้วไว้
-
-print("\nสร้าง joint trajectory arrays...")
-j1_arr = []; j2_arr = []; j3_arr = []
-j4_arr = []; j5_arr = []; j6_arr = []
-grip_arr = []
-
-for t_now in t_arr:
-    # เลือก joint angles ตาม phase
-    if   t_now < T1:  q = interp_q(t_now, T0, T1,  q_home, q_hov)
-    elif t_now < T2:  q = q_hov.copy()
-    elif t_now < T3:  q = interp_q(t_now, T2, T3,  q_hov,  q_pck)
-    elif t_now < T4:  q = q_pck.copy()   # grab — คง position
-    elif t_now < T5:  q = interp_q(t_now, T4, T5,  q_pck,  q_hov)
-    elif t_now < T6:  q = interp_q(t_now, T5, T6,  q_hov,  q_plh)
-    elif t_now < T7:  q = interp_q(t_now, T6, T7,  q_plh,  q_pl)
-    elif t_now < T8:  q = q_pl.copy()    # place — คง position
-    elif t_now < T9:  q = interp_q(t_now, T8, T9,  q_pl,   q_home)
-    else:             q = q_home.copy()
-
-    # gripper velocity
-    if   t_now < T1:          v_grip = V_OPEN    # เปิดก่อนไปรอ
-    elif t_now < T3:          v_grip = V_OPEN    # รอที่ hover (เปิดค้าง)
-    elif t_now < T4:          v_grip = V_CLOSE   # GRAB
-    elif t_now < T7:          v_grip = V_HOLD    # ถือระหว่างเดินทาง
-    elif t_now < T8:          v_grip = V_CLOSE   # กด hold ตอนวาง
-    else:                     v_grip = V_OPEN    # เปิดปล่อย+กลับ home
-
-    j1_arr.append(q[0]); j2_arr.append(q[1]); j3_arr.append(q[2])
-    j4_arr.append(q[3]); j5_arr.append(q[4]); j6_arr.append(q[5])
-    grip_arr.append(v_grip)
-
-print(f"  สร้าง {N} steps ({N*dt:.1f} วินาที) เสร็จแล้ว")
-print(f"\nJoint angles ที่ keypoints (deg):")
-print(f"  home : [{', '.join(f'{np.degrees(x):5.1f}' for x in q_home)}]")
-print(f"  hover: [{', '.join(f'{np.degrees(x):5.1f}' for x in q_hov)}]")
-print(f"  pick : [{', '.join(f'{np.degrees(x):5.1f}' for x in q_pck)}]")
-print(f"  p.hov: [{', '.join(f'{np.degrees(x):5.1f}' for x in q_plh)}]")
-print(f"  place: [{', '.join(f'{np.degrees(x):5.1f}' for x in q_pl)}]")
-
-# ══════════════════════════════════════════════════════════════
-# 6. STEP 4 — Run Simulation
-# ══════════════════════════════════════════════════════════════
-print("\n" + "="*55)
-print("STEP 4: Run Simulation")
-print("="*55)
-
-client = RemoteAPIClient()
-sim    = client.require('sim')
-
-joints = [sim.getObject(f'/yaskawa/joint{i}') for i in range(1,7)]
-m1 = sim.getObject('/yaskawa/MicoHand/fingers12_motor1')
-m2 = sim.getObject('/yaskawa/MicoHand/fingers12_motor2')
-
-sim.setStepping(True)
-sim.startSimulation()
-
+# ==============================================================================
+# 5. MAIN SEQUENCE (RUN SIMULATION)
+# ==============================================================================
 try:
-    for step_i in range(N):
-        # set joint positions (tutorial slide 18-19)
-        sim.setJointPosition(joints[0], float(j1_arr[step_i]))
-        sim.setJointPosition(joints[1], float(j2_arr[step_i]))
-        sim.setJointPosition(joints[2], float(j3_arr[step_i]))
-        sim.setJointPosition(joints[3], float(j4_arr[step_i]))
-        sim.setJointPosition(joints[4], float(j5_arr[step_i]))
-        sim.setJointPosition(joints[5], float(j6_arr[step_i]))
+    sim.startSimulation()
+    print("🚀 เริ่มลุย Pick & Place!")
 
-        # set gripper velocity (tutorial slide 21)
-        sim.setJointTargetVelocity(m1, float(grip_arr[step_i]))
-        sim.setJointTargetVelocity(m2, float(grip_arr[step_i]))
+    # เซ็ตค่าเริ่มต้นให้ตรงกับ Home
+    current_angles = np.array(home_angles)
+    for i in range(6): sim.setJointPosition(joints[i], m.radians(home_angles[i]))
+    for _ in range(10): step_sim()
 
-        sim.step()
+    # เปิดกริปเปอร์รอ
+    current_vgripper = 0.15 
+    sim.setJointTargetVelocity(mico_motor1, current_vgripper)
+    sim.setJointTargetVelocity(mico_motor2, current_vgripper)
 
-    print("✓ Simulation เสร็จสิ้น!")
+    # 🌟 สเตปที่เพิ่มมา: วอร์มแขนเข้าท่า Ready ก่อน (ใช้เวลา 2 วินาที)
+    print("📍 ขยับเข้าท่าเตรียมพร้อม (หลบ Singularity)...")
+    move_lfpb_sync(ready_angles, 2.0)
+
+    # 1. ไปรอเหนือแก้ว (ใช้เวลา 2 วิ)
+    print("📍 เคลื่อนที่ไปดักรอเหนือแก้ว...")
+    move_lfpb_sync(pick_approach_angles, 2.0)
+    
+    # 2. ดักรอเวลา! - รอจนถึงวินาทีที่ 6.5 (หักเวลาที่เดินทางมาแล้วออก)
+    print("⏳ รอให้แก้วน้ำวิ่งเข้ามาในระยะเป้าหมาย (วินาทีที่ 7.5)...")
+    while sim.getSimulationTime() < 6.5:
+        step_sim()
+        
+    # 3. โฉบลงไปหยิบ (ใช้เวลา 1 วินาที -> จะไปถึงแก้วตอน 7.5 พอดีเป๊ะ!)
+    print("📍 สับมือลงไปหยิบ!")
+    move_lfpb_sync(pick_angles, 1.0)
+    
+    # ... (หลังจากนี้ก็เป็นโค้ดหนีบแก้ว ยกแก้ว ไปวาง เหมือนเดิมเลยครับ) ...
+    
+    # 4. หนีบแก้ว
+    print("🔒 หนีบกริปเปอร์...")
+    current_vgripper = -0.15 # เปลี่ยนความเร็วเป็นติดลบ (ปิดมือ)
+    sim.setJointTargetVelocity(mico_motor1, current_vgripper)
+    sim.setJointTargetVelocity(mico_motor2, current_vgripper)
+    for _ in range(20): step_sim() # รอ 1 วิ ให้หนีบแน่น
+    
+    # 5. ยกแก้วขึ้น
+    move_lfpb_sync(pick_approach_angles, 1.5)
+    
+    # 6. ย้ายไปฝั่งวาง
+    print("📍 ย้ายแก้วไปที่สายพานเป้าหมาย...")
+    move_lfpb_sync(place_approach_angles, 3.0)
+    
+    # 7. วางแก้วลง
+    move_lfpb_sync(place_angles, 1.5)
+    
+    # 8. ปล่อยกริปเปอร์
+    print("🔓 ปล่อยแก้ว...")
+    current_vgripper = 0.15 # เปลี่ยนความเร็วเป็นบวก (เปิดมือ)
+    sim.setJointTargetVelocity(mico_motor1, current_vgripper)
+    sim.setJointTargetVelocity(mico_motor2, current_vgripper)
+    for _ in range(20): step_sim() 
+    
+    # 9. ยกแขนขึ้น
+    move_lfpb_sync(place_approach_angles, 1.5)
+    
+    # 10. กลับ Home
+    move_lfpb_sync(home_angles, 3.0)
+    
+    print("🎉 ภารกิจสำเร็จ! เตรียมดูกราฟ...")
 
 finally:
     sim.setStepping(False)
     sim.stopSimulation()
+
+# ==============================================================================
+# 6. PLOT GRIPPER VELOCITY (Rubric 4.2)
+# ==============================================================================
+plt.figure(figsize=(8, 4))
+plt.plot(time_log, vgripper_log, 'g-', linewidth=2)
+plt.title("Gripper Velocity vs Time (Rubric 4.2)")
+plt.xlabel("Time (s)")
+plt.ylabel("Velocity (m/s)")
+plt.grid(True)
+plt.axhline(0, color='black', linewidth=0.5)
+plt.fill_between(time_log, vgripper_log, 0, alpha=0.3, color='green')
+plt.show()
