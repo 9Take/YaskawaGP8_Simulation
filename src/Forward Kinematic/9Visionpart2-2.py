@@ -16,9 +16,9 @@ joints = [sim.getObject(f'/yaskawa/joint{i}') for i in range(1, 7)]
 # =========================================================
 # 🎯 2. ตั้งค่าเป้าหมาย (พิกัด Pick)
 # =========================================================
-TARGET_X = 0.4072 
-TARGET_Y = 0.1600 
-TARGET_Z = -0.4000 
+TARGET_X = 0.3897 
+TARGET_Y = 0.0623 
+TARGET_Z = -0.5609 
 
 GRIPPER_OFFSET = 0.16  
 angle_to_target = np.arctan2(TARGET_Y, TARGET_X)
