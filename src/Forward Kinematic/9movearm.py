@@ -1,100 +1,209 @@
+"""
+Yaskawa GP8 Pick & Place Controller
+Core Principles:
+1. Real-time Numerical Jacobian Inverse Kinematics
+2. Damped Least Squares (DLS) for singularity avoidance
+3. Decoupled Joint Control (Independent J5/J6 override)
+4. Dynamic Parent-Child Attachment for stable grasping
+"""
+
 import time
-import math
+import numpy as np
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
-print("🔌 เชื่อมต่อกับ CoppeliaSim...")
+# =========================================================
+# ⚙️ 1. INITIALIZATION & SETUP
+# =========================================================
+print("🔌 Connecting to CoppeliaSim...")
 client = RemoteAPIClient()
 sim = client.require('sim')
 
-# เชื่อมต่อชิ้นส่วนต่างๆ
-joints = [sim.getObject(f'/yaskawa/joint{i}') for i in range(1, 7)]
-mico_motor1 = sim.getObject('/yaskawa/MicoHand/fingers12_motor1')
-mico_motor2 = sim.getObject('/yaskawa/MicoHand/fingers12_motor2')
-
-# 💡 เช็ค Path แก้วให้ตรงกับ Scene ของคุณ
-cup_handle = sim.getObject('/20cmHighWallL[1]/Cup') 
-ef_handle = sim.getObject('/yaskawa/gripperEF')
-
-# =================================================================
-# 🎯 ชุดตัวเลขมุมที่คุณคำนวณมาได้
-# =================================================================
-home_angles  = [0.00,   0.00,   0.00,   0.00,  -90.0, 0.00] # ท่าพัก
-
-# ท่าหยิบแก้ว (เป๊ะตามที่คุณหามา)
-pick_angles  = [14.90, -26.80, -59.48,   0.00,  0.00, 0.00] 
-
-# ท่าวางคว่ำ (💡 ผมแก้ j4 ให้เป็น 180.00 ให้แล้วครับ แก้วจะได้พลิกคว่ำ!)
-place_angles = [ 3.92,   5.43, -34.46, 180.00,  0.00, 0.00] 
-
-# =================================================================
-# 🚁 จุดแวะพัก (Hover) 
-# =================================================================
-# ก๊อปปี้ตัวเลขจากด้านบนมาเลย แต่ปรับ j2 (ตัวที่ 2) ให้แขนยกสูงขึ้น
-hover_pick   = [14.90, -10.00, -59.48,   0.00,  0.00, 0.00] # ปรับ j2 จาก -26.80 มาเป็น -10.00
-hover_place  = [ 3.92, -20.00, -34.46, 180.00,  0.00, 0.00] # ปรับ j2 จาก 5.43 มาเป็น -20.00 (เพื่อดึงแขนขึ้น)
-
-# =================================================================
-# ⚙️ ฟังก์ชันควบคุมหุ่นยนต์
-# =================================================================
-def move_arm(target_deg, steps=40, delay=0.01):
-    """ฟังก์ชันขยับข้อต่อแบบสมูทๆ ค่อยๆ เลื่อนทีละเฟรม"""
-    current_rad = [sim.getJointPosition(j) for j in joints]
-    target_rad = [math.radians(deg) for deg in target_deg]
-    
-    for step in range(1, steps + 1):
-        for i in range(6):
-            new_pos = current_rad[i] + (target_rad[i] - current_rad[i]) * (step / steps)
-            sim.setJointPosition(joints[i], new_pos)
-        sim.step()
-        time.sleep(delay)
-
-def set_gripper(velocity):
-    """ฟังก์ชันอ้า/หุบ กริปเปอร์"""
-    sim.setJointTargetVelocity(mico_motor1, velocity)
-    sim.setJointTargetVelocity(mico_motor2, velocity)
-    for _ in range(20): sim.step()
-
-# =================================================================
-# 🎬 แอคชัน! (เริ่มถ่ายทำ)
-# =================================================================
-sim.setStepping(True)
-sim.startSimulation()
+# กำหนดพิกัดเป้าหมาย (Delivery Point)
+DELIVERY_XYZ = [0.6109, 0.0623, 0.5392]
 
 try:
-    print("1️⃣ เริ่มต้น: ยกแขนเตรียมพร้อม")
-    move_arm(home_angles)
-    set_gripper(0.15) # อ้ามือรอ
-    time.sleep(0.5)
+    # ดึง Handles ของชิ้นส่วนหลัก
+    robot = sim.getObject('/yaskawa')
+    tip = sim.getObject('/yaskawa/gripperEF')
+    joint_h = [sim.getObject(f'/yaskawa/joint{i}') for i in range(1, 7)]
     
-    print("2️⃣ เอื้อมไปหยิบแก้ว (Pick)")
-    move_arm(hover_pick)  # โฉบไปรอเหนือแก้ว
-    move_arm(pick_angles) # กดแขนลงไปตำแหน่ง X, Y, Z ของคุณ
+    # ดึง Handles ของ Gripper (รองรับชื่อต่างกันใน Scene)
+    try:
+        j0 = sim.getObject('/yaskawa/fingers12_motor1')
+        j1 = sim.getObject('/yaskawa/fingers12_motor2')
+    except:
+        j0 = sim.getObject('/yaskawa/MicoHand/fingers12_motor1')
+        j1 = sim.getObject('/yaskawa/MicoHand/fingers12_motor2')
+        
+    # ดึง Handle ของแก้วน้ำ (รองรับกรณีมี Index)
+    try:
+        cup_h = sim.getObject('/20cmHighWallL[1]/Cup')
+    except:
+        cup_h = sim.getObject('/20cmHighWallL/Cup')
+        
+except Exception as e:
+    print(f"❌ Object check failed: {e}. Please check your scene hierarchy.")
+    exit()
+
+# =========================================================
+# 🛠️ 2. HELPER FUNCTIONS
+# =========================================================
+def print_joint_angles(label="State"):
+    """อ่านค่ามุมข้อต่อทั้งหมด แปลงเป็นองศา และแสดงผล"""
+    q_rad = [sim.getJointPosition(j) for j in joint_h]
+    q_deg = [round(np.rad2deg(angle), 2) for angle in q_rad]
     
-    print("3️⃣ หนีบแก้ว!")
-    set_gripper(-0.15)
-    # 💡 ทริควิศวกร: แปะแก้วติดมือแบบล็อคตายตัว ป้องกันร่วงตอนตีลังกา
-    sim.setObjectInt32Param(cup_handle, sim.shapeintparam_static, 1)
-    sim.setObjectParent(cup_handle, ef_handle, True)
-    
-    print("4️⃣ ยกแก้วขึ้น")
-    move_arm(hover_pick)
-    
-    print("5️⃣ สวิงข้ามไปฝั่งแท่นวาง พร้อมตีลังกาข้อมือ (FLIP!)")
-    move_arm(hover_place, steps=60) # เพิ่ม step ให้สวิงช้าลงภาพจะได้สวยๆ
-    move_arm(place_angles) # กดแขนลงวางคว่ำ
-    
-    print("6️⃣ ปล่อยแก้วลงบนแท่น (Place)")
-    sim.setObjectParent(cup_handle, -1, True) # ปลดล็อคแก้วออกจากมือ
-    sim.setObjectInt32Param(cup_handle, sim.shapeintparam_static, 0) # เปิดฟิสิกส์ให้แก้วอีกครั้ง
-    set_gripper(0.15) # อ้ามือออก
-    
-    print("7️⃣ ดึงแขนกลับท่า Home")
-    move_arm(hover_place)
-    move_arm(home_angles)
-    
-    print("🎉 คัท! การแสดงจบสมบูรณ์แบบ ได้วิดีโอส่งอาจารย์แล้วครับ!")
-    
-finally:
-    sim.stopSimulation()
-    sim.setStepping(False)
-    print("🔚 ปิดการเชื่อมต่อ")
+    print(f"\n📊 [JOINT ANGLES] : {label}")
+    print(f"   J1: {q_deg[0]:+7.2f}° | J2: {q_deg[1]:+7.2f}° | J3: {q_deg[2]:+7.2f}°")
+    print(f"   J4: {q_deg[3]:+7.2f}° | J5: {q_deg[4]:+7.2f}° | J6: {q_deg[5]:+7.2f}°")
+    print("-" * 55)
+
+def set_gripper_velocity(velocity):
+    """ควบคุมความเร็วการเปิด/ปิด Gripper (บวก = เปิด, ลบ = ปิด)"""
+    sim.setJointTargetVelocity(j0, velocity)
+    sim.setJointTargetVelocity(j1, velocity)
+
+def attach_cup(is_attached):
+    """
+    หลักการ: Parenting Bypass
+    ปลดฟิสิกส์ชั่วคราวและแปะแก้วเข้ากับมือ เพื่อกันแก้วหลุดหล่นตอนตีลังกา
+    """
+    if is_attached:
+        sim.setObjectInt32Param(cup_h, sim.shapeintparam_static, 1)
+        sim.resetDynamicObject(cup_h)
+        sim.setObjectParent(cup_h, tip, True)
+        print("🔒 Status: CUP ATTACHED")
+    else:
+        sim.setObjectParent(cup_h, -1, True)
+        sim.setObjectInt32Param(cup_h, sim.shapeintparam_static, 0)
+        sim.resetDynamicObject(cup_h)
+        print("🔓 Status: CUP RELEASED")
+
+def move_robot(target_xyz, target_j5=None, target_j6=None, duration=3.0):
+    """
+    หลักการ: Numerical Jacobian + Damped Least Squares
+    สามารถแยกบังคับข้อมือ (J5, J6) ได้อิสระ ในขณะที่ J1-J4 ยังคงทำหน้าที่เข้าหาเป้าหมาย
+    """
+    dt = 0.05
+    steps = int(duration / dt)
+    damping = 0.15
+    gain = 1.2
+
+    # จดจำมุมเริ่มต้นของ J5, J6 สำหรับทำ Linear Interpolation
+    start_j5 = sim.getJointPosition(joint_h[4])
+    start_j6 = sim.getJointPosition(joint_h[5])
+
+    for step in range(steps):
+        # 1. อ่านค่าพิกัดปัจจุบัน (ดึงเทียบ World Frame ตามต้นฉบับ)
+        q_curr = np.array([sim.getJointPosition(j) for j in joint_h])
+        curr_pos = np.array(sim.getObjectPosition(tip, sim.handle_world))
+        
+        # 2. หา Error ระยะทาง
+        error = np.array(target_xyz) - curr_pos
+        
+        # 3. คำนวณ Numerical Jacobian Matrix (3x6) แบบสดๆ
+        J = np.zeros((3, 6))
+        epsilon = 1e-4
+        for i in range(6):
+            orig = sim.getJointPosition(joint_h[i])
+            sim.setJointPosition(joint_h[i], orig + epsilon)
+            new_p = np.array(sim.getObjectPosition(tip, sim.handle_world))
+            J[:, i] = (new_p - curr_pos) / epsilon
+            sim.setJointPosition(joint_h[i], orig)
+
+        # 4. แก้สมการ IK ด้วย DLS (Damped Least Squares)
+        inv_j = J.T @ np.linalg.inv(J @ J.T + (damping**2) * np.eye(3))
+        dq = inv_j @ (error * gain)
+        
+        # 5. อัปเดตมุมมอเตอร์
+        # 5.1 ให้ฐานถึงศอก (J1-J4) วิ่งตามสมการ IK
+        for i in range(4):
+            sim.setJointPosition(joint_h[i], q_curr[i] + dq[i] * dt)
+        
+        # 5.2 ข้อพับข้อมือ (J5) - ถ้าสั่ง Override ให้วิ่งตามสัดส่วนเวลา ถ้าไม่สั่งก็ใช้ IK
+        if target_j5 is not None:
+            progress = (step + 1) / steps
+            j5_step = start_j5 + (target_j5 - start_j5) * progress
+            sim.setJointPosition(joint_h[4], j5_step)
+        else:
+            sim.setJointPosition(joint_h[4], q_curr[4] + dq[4] * dt)
+
+        # 5.3 ข้อหมุนข้อมือ (J6) - ควบคุมแยกอิสระเช่นเดียวกับ J5
+        if target_j6 is not None:
+            progress = (step + 1) / steps
+            j6_step = start_j6 + (target_j6 - start_j6) * progress
+            sim.setJointPosition(joint_h[5], j6_step)
+        else:
+            sim.setJointPosition(joint_h[5], q_curr[5] + dq[5] * dt)
+
+        sim.step()
+
+# =========================================================
+# 🚀 3. MAIN EXECUTION LOOP
+# =========================================================
+def main():
+    try:
+        print("\n🎬 Initializing Simulation...")
+        sim.setStepping(True)
+        sim.startSimulation()
+        print_joint_angles("Start / Home Position")
+
+        # สแกนหาตำแหน่งแก้วปัจจุบัน
+        cup_pos = sim.getObjectPosition(cup_h, sim.handle_world)
+        
+
+        # ---------------------------------------------------------
+        print("\n▶️ STEP 1: APPROACH (เคลื่อนที่ไปรอเหนือแก้ว)")
+        set_gripper_velocity(1.0) # อ้ามือ
+        curr_j5 = sim.getJointPosition(joint_h[4]) # ไว้จูนระดับการเงยของข้อมือตอนวาง
+        move_robot([cup_pos[0], cup_pos[1], cup_pos[2] + 0.10] , target_j5 = curr_j5 + 0.6 , duration=3.0)
+        move_robot([cup_pos[0], cup_pos[1], cup_pos[2] - 0.0785] , duration=1.0)
+        print_joint_angles("At Cup Position")
+
+        # ---------------------------------------------------------
+        print("\n▶️ STEP 2: GRASP (หนีบแก้ว)")
+        set_gripper_velocity(-1.0)
+        for _ in range(25): sim.step() 
+        attach_cup(True)
+
+        # ---------------------------------------------------------
+        print("\n▶️ STEP 3: LIFT (ดึงแก้วขึ้นในแนวดิ่ง)")
+        lift_height = [cup_pos[0], cup_pos[1], cup_pos[2] + 0.35]
+        move_robot(lift_height, duration=2.0)
+        print_joint_angles("After Lift")
+
+        # ---------------------------------------------------------
+        print("\n▶️ STEP 4: FLIP (บิดข้อมือ J6 ตีลังกา 180 องศา)")
+        curr_j6 = sim.getJointPosition(joint_h[5])
+        final_j6 = curr_j6 + np.pi  # บิดเพิ่ม 180 องศา (Pi Radians)
+        move_robot(lift_height, target_j6=final_j6, duration=1.5)
+        print_joint_angles("After Flip (J6)")
+
+        # ---------------------------------------------------------
+        print("\n▶️ STEP 5: TILT UP (เงยข้อมือ J5 ขึ้นเพื่อเตรียมวาง)")
+        curr_j5 = sim.getJointPosition(joint_h[4])
+        final_j5 = curr_j5 - 0.4
+        move_robot(lift_height, target_j6=final_j6, target_j5=final_j5, duration=1.5)
+        print_joint_angles("After Tilt (J5)")
+
+        # ---------------------------------------------------------
+        print(f"\n▶️ STEP 6: MOVE TO DELIVERY (นำทางไปยังพิกัดวาง {DELIVERY_XYZ})")
+        # ลากแขนไปจุดวาง พร้อมรักษาระดับการตีลังกาของข้อมือ J5, J6 เอาไว้
+        move_robot(DELIVERY_XYZ, target_j6=final_j6, target_j5=final_j5 , duration=3.0)
+        print_joint_angles("At Delivery Point")
+
+        # ---------------------------------------------------------
+        print("\n▶️ STEP 7: RELEASE (ปล่อยแก้ว)")
+        attach_cup(False)
+        set_gripper_velocity(1.0)
+        for _ in range(40): sim.step()
+        print_joint_angles("Final Release State")
+
+    finally:
+        sim.stopSimulation()
+        sim.setStepping(False)
+        print("\n🏁 Simulation Process Complete.")
+
+# สั่งรันโปรแกรม
+if __name__ == "__main__":
+    main()

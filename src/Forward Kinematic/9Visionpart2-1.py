@@ -59,38 +59,46 @@ try:
                 cv2.putText(img, "PLACE ZONE", (cx-45, cy-15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                 
                 # ดึงพิกัด 3D จุดกึ่งกลางแท่น
-                px, py, pz = 0, 0, 0
+                px_base, py_base, pz_base = 0, 0, 0
+                px_world, py_world, pz_world = 0, 0, 0
+                
                 for i in range(4):
                     try:
                         marker_h = sim.getObject(f'/20cmHighWallL[0]/arucoMarker[{i}]')
-                        pos = sim.getObjectPosition(marker_h, base_handle) 
-                        px += pos[0]; py += pos[1]; pz += pos[2]
-                    except: pass
+                        
+                        # 1. ดึงเทียบกับ Base Frame (เอาไปใช้คำนวณ IK)
+                        pos_b = sim.getObjectPosition(marker_h, base_handle) 
+                        px_base += pos_b[0]; py_base += pos_b[1]; pz_base += pos_b[2]
+                        
+                        # 2. ดึงเทียบกับ World Frame (เอาไว้ดูเทียบกับตาเปล่าในโปรแกรม)
+                        pos_w = sim.getObjectPosition(marker_h, sim.handle_world)
+                        px_world += pos_w[0]; py_world += pos_w[1]; pz_world += pos_w[2]
+                        
+                    except Exception as e: 
+                        print(f"หา Marker {i} ไม่เจอ: {e}")
                 
-                # ชดเชยความสูงแก้วตอนวาง (+0.05m) ไม่ให้กระแทกแผ่น
-                place_x, place_y, place_z = px/4, py/4, (pz/4) + 0.05
+                # เฉลี่ยค่า 4 มุม และชดเชยความสูงแก้วตอนวาง (+0.05m)
+                place_x_base = px_base/4
+                place_y_base = py_base/4
+                place_z_base = (pz_base/4) + 0.05
                 
-                # ดึงมุมเอียงของแผ่นป้ายอ้างอิง (เพื่อหา Roll, Pitch, Yaw)
-                try:
-                    ref_marker = sim.getObject('/20cmHighWallL[0]/arucoMarker[0]')
-                    ori = sim.getObjectOrientation(ref_marker, base_handle)
-                    place_roll, place_pitch, place_yaw = math.degrees(ori[0]), math.degrees(ori[1]), math.degrees(ori[2])
-                except: pass
+                place_x_world = px_world/4
+                place_y_world = py_world/4
+                place_z_world = (pz_world/4) + 0.05
 
         cv2.imshow('Get Input Table 2 Data', img)
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             if place_found:
                 print("\n🎯 === ข้อมูลสำหรับ Input table 2 (หน้า 7) ===")
-                print(f"X     : {place_x:+.4f} m")
-                print(f"Y     : {place_y:+.4f} m")
-                print(f"Z     : {place_z:+.4f} m")
-                print(f"Roll  : {place_roll:+.2f} องศา")
-                print(f"Pitch : {place_pitch:+.2f} องศา")
-                print(f"Yaw   : {place_yaw:+.2f} องศา")
+                
+                print(f"\n🌍 พิกัด World Frame (เทียบกับในจอ CoppeliaSim):")
+                print(f"X : {place_x_world:+.4f} m, Y : {place_y_world:+.4f} m, Z : {place_z_world:+.4f} m")
+                
+                print(f"\n🤖 พิกัด Base Frame (ก๊อปปี้อันนี้ไปป้อนเข้า IK เท่านั้น!):")
+                print(f"X : {place_x_base:+.4f} m, Y : {place_y_base:+.4f} m, Z : {place_z_base:+.4f} m")
+                
                 print("===========================================")
-            else:
-                print("⚠️ สแกนไม่พบเป้าหมาย (ต้องเห็น ID 1,2,3,4 ครบ)")
             break
 finally:
     for i, j in enumerate(joints): sim.setJointPosition(j, home_angles[i])
