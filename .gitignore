@@ -219,4 +219,8 @@ yaskawaSim_tutorials/
 yaskawaGP8_group.zip
 yaskawaSim_tutorials.zip
 
+
+# --- Additional Examples ---
+Example/              # โฟลเดอร์ตัวอย่างโค้ดที่อาจจะไม่ต้องการเก็บใน Git
+
 # End of https://www.toptal.com/developers/gitignore/api/python,linux,visualstudiocode
