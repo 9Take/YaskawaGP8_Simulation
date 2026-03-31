@@ -6,8 +6,8 @@ import math
 client = RemoteAPIClient()
 sim = client.require('sim')
 
-timestep = 0.05  # 50 ms
-step = 600
+timestep = 0.5  # 50 ms
+step = 400
 
 place_pos_conv = np.array([0.455, 0.500, 0.400]) # ตำแหน่งที่เราจะวางแก้ว (อาจต้องปรับตามฉากของคุณ)
 place_ori_conv = np.array([0.0, 0.0, 0.0]) # สมมติว่าเราไม่สนใจการวางแก้วในมุมเฉพาะ (หรือปรับตามความต้องการ)
@@ -158,6 +158,20 @@ user_input = input(f"\n  >>> Enter GRAB_STEP (Press ENTER to use recommended {re
 final_grab_step = int(user_input) if user_input.isdigit() else recommended_idx
 
 print(f"  [LOCKED] Proceeding with GRAB_STEP: {final_grab_step}")
+
+# Print cup coordinates at the selected grab step
+grab_time = final_grab_step * timestep
+grab_pos = np.array([cup_px[final_grab_step], cup_py[final_grab_step], cup_pz[final_grab_step]])
+grab_ori = np.array([cup_ox[final_grab_step], cup_oy[final_grab_step], cup_oz[final_grab_step]])
+grab_vel = np.array([cup_vx[final_grab_step], cup_vy[final_grab_step], cup_vz[final_grab_step]])
+
+print(f"\n  === Cup Coordinates at GRAB_STEP {final_grab_step} (Time: {grab_time:.2f}s) ===")
+print(f"  Position (X, Y, Z):     {grab_pos.round(4)}")
+print(f"  Orientation (rad):      {grab_ori.round(4)}")
+print(f"  Orientation (degrees):  {np.degrees(grab_ori).round(2)}")
+print(f"  Velocity (Vx, Vy, Vz):  {grab_vel.round(4)}")
+print(f"  Speed:                  {np.linalg.norm(grab_vel):.4f} m/s")
+print()
 
 # Save ข้อมูลลงไฟล์ .npz เพื่อส่งต่อให้ไฟล์อื่น
 filename = 'trajectory_cup_data.npz'
