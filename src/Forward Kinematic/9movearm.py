@@ -1,209 +1,193 @@
-"""
-Yaskawa GP8 Pick & Place Controller
-Core Principles:
-1. Real-time Numerical Jacobian Inverse Kinematics
-2. Damped Least Squares (DLS) for singularity avoidance
-3. Decoupled Joint Control (Independent J5/J6 override)
-4. Dynamic Parent-Child Attachment for stable grasping
-"""
-
 import time
 import numpy as np
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
-# =========================================================
-# ⚙️ 1. INITIALIZATION & SETUP
-# =========================================================
-print("🔌 Connecting to CoppeliaSim...")
-client = RemoteAPIClient()
-sim = client.require('sim')
+class YaskawaRobot:
+    def __init__(self):
+        print("🔗 กำลังเชื่อมต่อระบบกับ CoppeliaSim...")
+        self.api_client = RemoteAPIClient()
+        self.sim = self.api_client.require('sim')
+        
+        # ตั้งค่าคงที่ของหุ่นยนต์
+        self.TARGET_DROP_ZONE = [0.6109, 0.0623, 0.5392]
+        self.TIME_STEP = 0.05
+        self.IK_DAMPING = 0.15
+        self.IK_GAIN = 1.2
+        self.DELTA_EPSILON = 1e-4
 
-# กำหนดพิกัดเป้าหมาย (Delivery Point)
-DELIVERY_XYZ = [0.6109, 0.0623, 0.5392]
+        self._initialize_handles()
 
-try:
-    # ดึง Handles ของชิ้นส่วนหลัก
-    robot = sim.getObject('/yaskawa')
-    tip = sim.getObject('/yaskawa/gripperEF')
-    joint_h = [sim.getObject(f'/yaskawa/joint{i}') for i in range(1, 7)]
+    def _initialize_handles(self):
+        """ดึงข้อมูล Handles ทั้งหมดจาก Simulator"""
+        self.base = self.sim.getObject('/yaskawa')
+        self.end_effector = self.sim.getObject('/yaskawa/gripperEF')
+        self.arm_joints = [self.sim.getObject(f'/yaskawa/joint{i}') for i in range(1, 7)]
+        
+        # ระบบ Gripper
+        self.finger_m1 = self.sim.getObject('/yaskawa/MicoHand/fingers12_motor1')
+        self.finger_m2 = self.sim.getObject('/yaskawa/MicoHand/fingers12_motor2')
+            
+        # วัตถุเป้าหมาย
+        self.target_cup = self.sim.getObject('/20cmHighWallL[1]/Cup')
     
-    # ดึง Handles ของ Gripper (รองรับชื่อต่างกันใน Scene)
-    try:
-        j0 = sim.getObject('/yaskawa/fingers12_motor1')
-        j1 = sim.getObject('/yaskawa/fingers12_motor2')
-    except:
-        j0 = sim.getObject('/yaskawa/MicoHand/fingers12_motor1')
-        j1 = sim.getObject('/yaskawa/MicoHand/fingers12_motor2')
+    def show_telemetry(self, phase_name="Current Status"):
+        """แสดงผลมุมของข้อต่อบนหน้าจอ"""
+        rad_angles = [self.sim.getJointPosition(j) for j in self.arm_joints]
+        deg_angles = [np.round(np.degrees(a), 2) for a in rad_angles]
         
-    # ดึง Handle ของแก้วน้ำ (รองรับกรณีมี Index)
-    try:
-        cup_h = sim.getObject('/20cmHighWallL[1]/Cup')
-    except:
-        cup_h = sim.getObject('/20cmHighWallL/Cup')
+        print(f"\n📌 [Phase]: {phase_name}")
+        print(f"   [J1-J3]: {deg_angles[0]:+7.2f}° | {deg_angles[1]:+7.2f}° | {deg_angles[2]:+7.2f}°")
+        print(f"   [J4-J6]: {deg_angles[3]:+7.2f}° | {deg_angles[4]:+7.2f}° | {deg_angles[5]:+7.2f}°")
+        print("-" * 50)
+
+    def actuate_gripper(self, speed):
+        """สั่งการกริปเปอร์ (เปิด/ปิด)"""
+        self.sim.setJointTargetVelocity(self.finger_m1, speed)
+        self.sim.setJointTargetVelocity(self.finger_m2, speed)
+
+    # def attach_payload(self, is_attached):
+    #     """
+    #     ระบบความปลอดภัยเสริม: เชื่อมต่อวัตถุเข้ากับ End-effector ทางฟิสิกส์
+    #     (ป้องกันวัตถุร่วงหล่นระหว่างการเคลื่อนที่แบบผาดโผน)
+    #     """
+    #     if is_attached:
+    #         self.sim.setObjectInt32Param(self.target_cup, self.sim.shapeintparam_static, 1)
+    #         self.sim.resetDynamicObject(self.target_cup)
+    #         self.sim.setObjectParent(self.target_cup, self.end_effector, True)
+    #         print("🔒 [Payload Status]: SECURED (ผูกแก้วติดกับมือแล้ว)")
+    #     else:
+    #         self.sim.setObjectParent(self.target_cup, -1, True)
+    #         self.sim.setObjectInt32Param(self.target_cup, self.sim.shapeintparam_static, 0)
+    #         self.sim.resetDynamicObject(self.target_cup)
+    #         print("🔓 [Payload Status]: RELEASED (ปลดล็อกฟิสิกส์แก้ว)")
+
+    def drive_tcp_to(self, goal_xyz, override_j5=None, override_j6=None, move_time=3.0):
+        """
+        เครื่องยนต์คำนวณ Inverse Kinematics หลัก
+        """
+        total_loops = int(move_time / self.TIME_STEP)
         
-except Exception as e:
-    print(f"❌ Object check failed: {e}. Please check your scene hierarchy.")
-    exit()
+        # เก็บค่าเริ่มต้นของข้อมือสำหรับการทำ Interpolation
+        init_j5 = self.sim.getJointPosition(self.arm_joints[4])
+        init_j6 = self.sim.getJointPosition(self.arm_joints[5])
+
+        for current_loop in range(total_loops):
+            # 1. เช็คสถานะปัจจุบัน
+            current_q = np.array([self.sim.getJointPosition(j) for j in self.arm_joints])
+            tcp_pos = np.array(self.sim.getObjectPosition(self.end_effector, self.sim.handle_world))
+            
+            # 2. หาระยะกระจัด (Error Vector)
+            dist_error = np.array(goal_xyz) - tcp_pos
+            
+            # 3. สร้าง Numerical Jacobian Matrix (3x6)
+            jacob_mat = np.zeros((3, 6))
+            for i in range(6):
+                original_q = self.sim.getJointPosition(self.arm_joints[i])
+                # แกล้งขยับเพื่อหาความชัน
+                self.sim.setJointPosition(self.arm_joints[i], original_q + self.DELTA_EPSILON)
+                perturbed_pos = np.array(self.sim.getObjectPosition(self.end_effector, self.sim.handle_world))
+                
+                jacob_mat[:, i] = (perturbed_pos - tcp_pos) / self.DELTA_EPSILON
+                self.sim.setJointPosition(self.arm_joints[i], original_q) # ดึงกลับ
+
+            # 4. อัลกอริทึม DLS (Damped Least Squares)
+            identity_mat = np.identity(3) # ใช้ identity แทน eye
+            dls_inverse = jacob_mat.T @ np.linalg.inv(jacob_mat @ jacob_mat.T + (self.IK_DAMPING**2) * identity_mat)
+            joint_velocities = dls_inverse @ (dist_error * self.IK_GAIN)
+            
+            # 5. สั่งอัปเดตมอเตอร์
+            # ชุดขับเคลื่อนหลัก (J1-J4)
+            for idx in range(4):
+                self.sim.setJointPosition(self.arm_joints[idx], current_q[idx] + joint_velocities[idx] * self.TIME_STEP)
+            
+            # ควบคุมข้อมือแยกอิสระ (Decoupled J5, J6)
+            ratio = (current_loop + 1) / total_loops
+            
+            if override_j5 is not None:
+                self.sim.setJointPosition(self.arm_joints[4], init_j5 + (override_j5 - init_j5) * ratio)
+            else:
+                self.sim.setJointPosition(self.arm_joints[4], current_q[4] + joint_velocities[4] * self.TIME_STEP)
+
+            if override_j6 is not None:
+                self.sim.setJointPosition(self.arm_joints[5], init_j6 + (override_j6 - init_j6) * ratio)
+            else:
+                self.sim.setJointPosition(self.arm_joints[5], current_q[5] + joint_velocities[5] * self.TIME_STEP)
+
+            self.sim.step()
+
+    def run_mission(self):
+        """รันลำดับขั้นตอน Pick and Place"""
+        try:
+            self.sim.setStepping(True)
+            self.sim.startSimulation()
+            self.show_telemetry("System Ready / Home")
+
+            # อ่านพิกัดเป้าหมาย (Position) และมุม (Orientation)
+            item_pos = self.sim.getObjectPosition(self.target_cup, self.sim.handle_world)
+            item_ori = self.sim.getObjectOrientation(self.target_cup, self.sim.handle_world)
+            
+            # แปลงมุมจากเรเดียน (Radian) เป็นองศา (Degree) เพื่อให้ดูง่ายขึ้น
+            roll_deg, pitch_deg, yaw_deg = np.degrees(item_ori)
+            
+            # 💡 ปริ้นท์ข้อมูลทั้งหมดสำหรับนำไปใส่ Input Table 1
+            print(f"\n🎯 [Target Acquired]: ข้อมูลแก้วน้ำที่ World Frame (สำหรับตาราง Input Table 1)")
+            print(f"   📍 Position (m)   -> X: {item_pos[0]:+.4f} | Y: {item_pos[1]:+.4f} | Z: {item_pos[2]:+.4f}")
+            print(f"   🔄 Orientation    -> Roll: {item_ori[0]:+.4f} rad ({roll_deg:+.2f}°) | Pitch: {item_ori[1]:+.4f} rad ({pitch_deg:+.2f}°) | Yaw: {item_ori[2]:+.4f} rad ({yaw_deg:+.2f}°)")
+
+
+            # --- Sequence 1: Approach ---
+            print("\n>> 1. Approaching Target...")
+            self.actuate_gripper(1.0)
+            
+            j5_current = self.sim.getJointPosition(self.arm_joints[4])
+            self.drive_tcp_to([item_pos[0], item_pos[1], item_pos[2] + 0.10], override_j5=j5_current + 0.6, move_time=3.0)
+            self.drive_tcp_to([item_pos[0], item_pos[1], item_pos[2] - 0.0785], move_time=1.0)
+            self.show_telemetry("Reached Target")
+
+            # --- Sequence 2: Grasp ---
+            print("\n>> 2. Grasping...")
+            self.actuate_gripper(-1.0)
+            for _ in range(25): self.sim.step()
+            # self.attach_payload(True) 
+        
+            # --- Sequence 3: Lift ---
+            print("\n>> 3. Lifting Payload...")
+            safe_z_height = [item_pos[0], item_pos[1], item_pos[2] + 0.35]
+            self.drive_tcp_to(safe_z_height, move_time=2.0)
+            self.show_telemetry("Payload Lifted")
+
+            # --- Sequence 4: Flip (J6) ---
+            print("\n>> 4. Executing Roll Maneuver (J6)...")
+            j6_current = self.sim.getJointPosition(self.arm_joints[5])
+            j6_target = j6_current + np.pi
+            self.drive_tcp_to(safe_z_height, override_j6=j6_target, move_time=1.5)
+
+            # --- Sequence 5: Tilt (J5) ---
+            print("\n>> 5. Executing Pitch Maneuver (J5)...")
+            j5_current = self.sim.getJointPosition(self.arm_joints[4])
+            j5_target = j5_current - 0.4
+            self.drive_tcp_to(safe_z_height, override_j6=j6_target, override_j5=j5_target, move_time=1.5)
+
+            # --- Sequence 6: Deliver ---
+            print(f"\n>> 6. Moving to Drop Zone: {self.TARGET_DROP_ZONE}")
+            self.drive_tcp_to(self.TARGET_DROP_ZONE, override_j6=j6_target, override_j5=j5_target, move_time=3.0)
+            self.show_telemetry("Arrived at Drop Zone")
+
+            # --- Sequence 7: Release ---
+            print("\n>> 7. Releasing Payload...") 
+            #self.attach_payload(False) 
+            self.actuate_gripper(1.0)
+            for _ in range(40): self.sim.step()
+            self.show_telemetry("Mission Accomplished")
+
+        finally:
+            self.sim.stopSimulation()
+            self.sim.setStepping(False)
+            print("\n🛑 System Offline.")
 
 # =========================================================
-# 🛠️ 2. HELPER FUNCTIONS
+# 🚀 บังคับรันโปรแกรม
 # =========================================================
-def print_joint_angles(label="State"):
-    """อ่านค่ามุมข้อต่อทั้งหมด แปลงเป็นองศา และแสดงผล"""
-    q_rad = [sim.getJointPosition(j) for j in joint_h]
-    q_deg = [round(np.rad2deg(angle), 2) for angle in q_rad]
-    
-    print(f"\n📊 [JOINT ANGLES] : {label}")
-    print(f"   J1: {q_deg[0]:+7.2f}° | J2: {q_deg[1]:+7.2f}° | J3: {q_deg[2]:+7.2f}°")
-    print(f"   J4: {q_deg[3]:+7.2f}° | J5: {q_deg[4]:+7.2f}° | J6: {q_deg[5]:+7.2f}°")
-    print("-" * 55)
-
-def set_gripper_velocity(velocity):
-    """ควบคุมความเร็วการเปิด/ปิด Gripper (บวก = เปิด, ลบ = ปิด)"""
-    sim.setJointTargetVelocity(j0, velocity)
-    sim.setJointTargetVelocity(j1, velocity)
-
-def attach_cup(is_attached):
-    """
-    หลักการ: Parenting Bypass
-    ปลดฟิสิกส์ชั่วคราวและแปะแก้วเข้ากับมือ เพื่อกันแก้วหลุดหล่นตอนตีลังกา
-    """
-    if is_attached:
-        sim.setObjectInt32Param(cup_h, sim.shapeintparam_static, 1)
-        sim.resetDynamicObject(cup_h)
-        sim.setObjectParent(cup_h, tip, True)
-        print("🔒 Status: CUP ATTACHED")
-    else:
-        sim.setObjectParent(cup_h, -1, True)
-        sim.setObjectInt32Param(cup_h, sim.shapeintparam_static, 0)
-        sim.resetDynamicObject(cup_h)
-        print("🔓 Status: CUP RELEASED")
-
-def move_robot(target_xyz, target_j5=None, target_j6=None, duration=3.0):
-    """
-    หลักการ: Numerical Jacobian + Damped Least Squares
-    สามารถแยกบังคับข้อมือ (J5, J6) ได้อิสระ ในขณะที่ J1-J4 ยังคงทำหน้าที่เข้าหาเป้าหมาย
-    """
-    dt = 0.05
-    steps = int(duration / dt)
-    damping = 0.15
-    gain = 1.2
-
-    # จดจำมุมเริ่มต้นของ J5, J6 สำหรับทำ Linear Interpolation
-    start_j5 = sim.getJointPosition(joint_h[4])
-    start_j6 = sim.getJointPosition(joint_h[5])
-
-    for step in range(steps):
-        # 1. อ่านค่าพิกัดปัจจุบัน (ดึงเทียบ World Frame ตามต้นฉบับ)
-        q_curr = np.array([sim.getJointPosition(j) for j in joint_h])
-        curr_pos = np.array(sim.getObjectPosition(tip, sim.handle_world))
-        
-        # 2. หา Error ระยะทาง
-        error = np.array(target_xyz) - curr_pos
-        
-        # 3. คำนวณ Numerical Jacobian Matrix (3x6) แบบสดๆ
-        J = np.zeros((3, 6))
-        epsilon = 1e-4
-        for i in range(6):
-            orig = sim.getJointPosition(joint_h[i])
-            sim.setJointPosition(joint_h[i], orig + epsilon)
-            new_p = np.array(sim.getObjectPosition(tip, sim.handle_world))
-            J[:, i] = (new_p - curr_pos) / epsilon
-            sim.setJointPosition(joint_h[i], orig)
-
-        # 4. แก้สมการ IK ด้วย DLS (Damped Least Squares)
-        inv_j = J.T @ np.linalg.inv(J @ J.T + (damping**2) * np.eye(3))
-        dq = inv_j @ (error * gain)
-        
-        # 5. อัปเดตมุมมอเตอร์
-        # 5.1 ให้ฐานถึงศอก (J1-J4) วิ่งตามสมการ IK
-        for i in range(4):
-            sim.setJointPosition(joint_h[i], q_curr[i] + dq[i] * dt)
-        
-        # 5.2 ข้อพับข้อมือ (J5) - ถ้าสั่ง Override ให้วิ่งตามสัดส่วนเวลา ถ้าไม่สั่งก็ใช้ IK
-        if target_j5 is not None:
-            progress = (step + 1) / steps
-            j5_step = start_j5 + (target_j5 - start_j5) * progress
-            sim.setJointPosition(joint_h[4], j5_step)
-        else:
-            sim.setJointPosition(joint_h[4], q_curr[4] + dq[4] * dt)
-
-        # 5.3 ข้อหมุนข้อมือ (J6) - ควบคุมแยกอิสระเช่นเดียวกับ J5
-        if target_j6 is not None:
-            progress = (step + 1) / steps
-            j6_step = start_j6 + (target_j6 - start_j6) * progress
-            sim.setJointPosition(joint_h[5], j6_step)
-        else:
-            sim.setJointPosition(joint_h[5], q_curr[5] + dq[5] * dt)
-
-        sim.step()
-
-# =========================================================
-# 🚀 3. MAIN EXECUTION LOOP
-# =========================================================
-def main():
-    try:
-        print("\n🎬 Initializing Simulation...")
-        sim.setStepping(True)
-        sim.startSimulation()
-        print_joint_angles("Start / Home Position")
-
-        # สแกนหาตำแหน่งแก้วปัจจุบัน
-        cup_pos = sim.getObjectPosition(cup_h, sim.handle_world)
-        
-
-        # ---------------------------------------------------------
-        print("\n▶️ STEP 1: APPROACH (เคลื่อนที่ไปรอเหนือแก้ว)")
-        set_gripper_velocity(1.0) # อ้ามือ
-        curr_j5 = sim.getJointPosition(joint_h[4]) # ไว้จูนระดับการเงยของข้อมือตอนวาง
-        move_robot([cup_pos[0], cup_pos[1], cup_pos[2] + 0.10] , target_j5 = curr_j5 + 0.6 , duration=3.0)
-        move_robot([cup_pos[0], cup_pos[1], cup_pos[2] - 0.0785] , duration=1.0)
-        print_joint_angles("At Cup Position")
-
-        # ---------------------------------------------------------
-        print("\n▶️ STEP 2: GRASP (หนีบแก้ว)")
-        set_gripper_velocity(-1.0)
-        for _ in range(25): sim.step() 
-        attach_cup(True)
-
-        # ---------------------------------------------------------
-        print("\n▶️ STEP 3: LIFT (ดึงแก้วขึ้นในแนวดิ่ง)")
-        lift_height = [cup_pos[0], cup_pos[1], cup_pos[2] + 0.35]
-        move_robot(lift_height, duration=2.0)
-        print_joint_angles("After Lift")
-
-        # ---------------------------------------------------------
-        print("\n▶️ STEP 4: FLIP (บิดข้อมือ J6 ตีลังกา 180 องศา)")
-        curr_j6 = sim.getJointPosition(joint_h[5])
-        final_j6 = curr_j6 + np.pi  # บิดเพิ่ม 180 องศา (Pi Radians)
-        move_robot(lift_height, target_j6=final_j6, duration=1.5)
-        print_joint_angles("After Flip (J6)")
-
-        # ---------------------------------------------------------
-        print("\n▶️ STEP 5: TILT UP (เงยข้อมือ J5 ขึ้นเพื่อเตรียมวาง)")
-        curr_j5 = sim.getJointPosition(joint_h[4])
-        final_j5 = curr_j5 - 0.4
-        move_robot(lift_height, target_j6=final_j6, target_j5=final_j5, duration=1.5)
-        print_joint_angles("After Tilt (J5)")
-
-        # ---------------------------------------------------------
-        print(f"\n▶️ STEP 6: MOVE TO DELIVERY (นำทางไปยังพิกัดวาง {DELIVERY_XYZ})")
-        # ลากแขนไปจุดวาง พร้อมรักษาระดับการตีลังกาของข้อมือ J5, J6 เอาไว้
-        move_robot(DELIVERY_XYZ, target_j6=final_j6, target_j5=final_j5 , duration=3.0)
-        print_joint_angles("At Delivery Point")
-
-        # ---------------------------------------------------------
-        print("\n▶️ STEP 7: RELEASE (ปล่อยแก้ว)")
-        attach_cup(False)
-        set_gripper_velocity(1.0)
-        for _ in range(40): sim.step()
-        print_joint_angles("Final Release State")
-
-    finally:
-        sim.stopSimulation()
-        sim.setStepping(False)
-        print("\n🏁 Simulation Process Complete.")
-
-# สั่งรันโปรแกรม
 if __name__ == "__main__":
-    main()
+    controller = YaskawaRobot()
+    controller.run_mission()

@@ -1,97 +1,176 @@
+import time
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider
-# หากมีปัญหาเรื่อง 3D ในเวอร์ชันของคุณ สามารถลบบรรทัด Axes3D ด้านล่างนี้ออกได้
-from mpl_toolkits.mplot3d import Axes3D 
+from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
-# ==========================================
-# 1. พารามิเตอร์หุ่นยนต์ Yaskawa GP8 (ใช้ L1-L7 เหมือนเดิม)
-# ==========================================
-L1 = 330      
-L2 = 345      
-L3 = 40       
-L4 = 40       
-L5 = 340      
-L6 = 80       
-L7 = 161.33   
+class YaskawaRobot:
+    def __init__(self):
+        print("🔗 กำลังเชื่อมต่อระบบกับ CoppeliaSim...")
+        self.api_client = RemoteAPIClient()
+        self.sim = self.api_client.require('sim')
+        
+        # ตั้งค่าคงที่ของหุ่นยนต์
+        self.TARGET_DROP_ZONE = [0.6109, 0.0623, 0.5392]
+        self.TIME_STEP = 0.05
+        self.IK_DAMPING = 0.15
+        self.IK_GAIN = 1.2
+        self.DELTA_EPSILON = 1e-4
 
-# ==========================================
-# 2. ฟังก์ชันคำนวณ Classical DH Matrix (Standard DH)
-# ==========================================
-# เรียงลำดับพารามิเตอร์ตามมาตรฐาน: Theta, d, a, alpha
-def std_dh(theta, d, a, alpha):
-    return np.array([
-        [np.cos(theta), -np.sin(theta)*np.cos(alpha),  np.sin(theta)*np.sin(alpha), a*np.cos(theta)],
-        [np.sin(theta),  np.cos(theta)*np.cos(alpha), -np.cos(theta)*np.sin(alpha), a*np.sin(theta)],
-        [0,              np.sin(alpha),                np.cos(alpha),               d],
-        [0,              0,                            0,                           1]
-    ])
+        self._initialize_handles()
 
-def get_joint_positions(t1, t2, t3, t4, t5, t6):
-    t1, t2, t3 = np.radians(t1), np.radians(t2), np.radians(t3)
-    t4, t5, t6 = np.radians(t4), np.radians(t5), np.radians(t6)
+    def _initialize_handles(self):
+        """ดึงข้อมูล Handles ทั้งหมดจาก Simulator"""
+        self.base = self.sim.getObject('/yaskawa')
+        self.end_effector = self.sim.getObject('/yaskawa/gripperEF')
+        self.arm_joints = [self.sim.getObject(f'/yaskawa/joint{i}') for i in range(1, 7)]
+        
+        # ระบบ Gripper
+        self.finger_m1 = self.sim.getObject('/yaskawa/MicoHand/fingers12_motor1')
+        self.finger_m2 = self.sim.getObject('/yaskawa/MicoHand/fingers12_motor2')
+            
+        # วัตถุเป้าหมาย
+        self.target_cup = self.sim.getObject('/20cmHighWallL[1]/Cup')
     
-    pi_half = np.pi / 2
-    
-    T0 = np.eye(4) # ฐาน (Base)
-    
-    # ==========================================
-    # ⚠️ นำตาราง Classical DH ของคุณมาใส่ตรงนี้ ⚠️
-    # รูปแบบการใส่: std_dh( theta, d, a, alpha )
-    # ==========================================
-    # (โค้ดด้านล่างนี้เป็นเพียงตัวอย่างรอการแก้ไขจากคุณ)
-    T1 = T0 @ std_dh(t1, L1, L3,  pi_half)     
-    T2 = T1 @ std_dh(t2,  0, L2, 0)          
-    T3 = T2 @ std_dh(t3,  0, L4, pi_half)    
-    T4 = T3 @ std_dh(t4, L5,  0, -pi_half)   
-    T5 = T4 @ std_dh(t5,  0,  0, pi_half)    
-    T6 = T5 @ std_dh(t6, L6+L7, 0, 0)        
-    
-    # ดึงเฉพาะตำแหน่ง X, Y, Z ของทุกจุดเชื่อมต่อมาเรียงกัน
-    positions = np.vstack([
-        T0[:3, 3], T1[:3, 3], T2[:3, 3], 
-        T3[:3, 3], T4[:3, 3], T5[:3, 3], T6[:3, 3]
-    ])
-    return positions
+    def show_telemetry(self, phase_name="Current Status"):
+        """แสดงผลมุมของข้อต่อบนหน้าจอ"""
+        rad_angles = [self.sim.getJointPosition(j) for j in self.arm_joints]
+        deg_angles = [np.round(np.degrees(a), 2) for a in rad_angles]
+        
+        print(f"\n📌 [Phase]: {phase_name}")
+        print(f"   [J1-J3]: {deg_angles[0]:+7.2f}° | {deg_angles[1]:+7.2f}° | {deg_angles[2]:+7.2f}°")
+        print(f"   [J4-J6]: {deg_angles[3]:+7.2f}° | {deg_angles[4]:+7.2f}° | {deg_angles[5]:+7.2f}°")
+        print("-" * 50)
 
-# ==========================================
-# 3. สร้างหน้าต่างกราฟิก 3 มิติ และ Slider (เหมือนเดิม)
-# ==========================================
-fig = plt.figure(figsize=(10, 8))
-ax = fig.add_subplot(111, projection='3d')
-plt.subplots_adjust(left=0.1, bottom=0.35) 
+    def actuate_gripper(self, speed):
+        """สั่งการกริปเปอร์ (เปิด/ปิด)"""
+        self.sim.setJointTargetVelocity(self.finger_m1, speed)
+        self.sim.setJointTargetVelocity(self.finger_m2, speed)
 
-init_angles = [0, 0, 0, 0, 0, 0]
-pts = get_joint_positions(*init_angles)
-line, = ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], 'o-', lw=4, markersize=8, color='b')
-ax.plot([0], [0], [0], 'ko', markersize=10) 
 
-limit = 1000
-ax.set_xlim([-limit, limit])
-ax.set_ylim([-limit, limit])
-ax.set_zlim([0, 1200])
-ax.set_xlabel('X (mm)')
-ax.set_ylabel('Y (mm)')
-ax.set_zlabel('Z (mm)')
-ax.set_title('Yaskawa GP8 Kinematics Viewer (Classical DH)')
+    def drive_tcp_to(self, goal_xyz, override_j5=None, override_j6=None, move_time=3.0):
+        """
+        เครื่องยนต์คำนวณ Inverse Kinematics หลัก
+        """
+        total_loops = int(move_time / self.TIME_STEP)
+        
+        # เก็บค่าเริ่มต้นของข้อมือสำหรับการทำ Interpolation
+        init_j5 = self.sim.getJointPosition(self.arm_joints[4])
+        init_j6 = self.sim.getJointPosition(self.arm_joints[5])
 
-axcolor = 'lightgoldenrodyellow'
-slider_axes = [plt.axes([0.15, 0.25 - i*0.04, 0.65, 0.03], facecolor=axcolor) for i in range(6)]
-sliders = []
-names = ['Theta 1', 'Theta 2', 'Theta 3', 'Theta 4', 'Theta 5', 'Theta 6']
+        for current_loop in range(total_loops):
+            # 1. เช็คสถานะปัจจุบัน
+            current_q = np.array([self.sim.getJointPosition(j) for j in self.arm_joints])
+            tcp_pos = np.array(self.sim.getObjectPosition(self.end_effector, self.sim.handle_world))
+            
+            # 2. หาระยะกระจัด (Error Vector)
+            dist_error = np.array(goal_xyz) - tcp_pos
+            
+            # 3. สร้าง Numerical Jacobian Matrix (3x6)
+            jacob_mat = np.zeros((3, 6))
+            for i in range(6):
+                original_q = self.sim.getJointPosition(self.arm_joints[i])
+                # แกล้งขยับเพื่อหาความชัน
+                self.sim.setJointPosition(self.arm_joints[i], original_q + self.DELTA_EPSILON)
+                perturbed_pos = np.array(self.sim.getObjectPosition(self.end_effector, self.sim.handle_world))
+                
+                jacob_mat[:, i] = (perturbed_pos - tcp_pos) / self.DELTA_EPSILON
+                self.sim.setJointPosition(self.arm_joints[i], original_q) # ดึงกลับ
 
-for i, sax in enumerate(slider_axes):
-    s = Slider(sax, names[i], -180.0, 180.0, valinit=init_angles[i])
-    sliders.append(s)
+            # 4. อัลกอริทึม DLS (Damped Least Squares)
+            identity_mat = np.identity(3) # ใช้ identity แทน eye
+            dls_inverse = jacob_mat.T @ np.linalg.inv(jacob_mat @ jacob_mat.T + (self.IK_DAMPING**2) * identity_mat)
+            joint_velocities = dls_inverse @ (dist_error * self.IK_GAIN)
+            
+            # 5. สั่งอัปเดตมอเตอร์
+            # ชุดขับเคลื่อนหลัก (J1-J4)
+            for idx in range(4):
+                self.sim.setJointPosition(self.arm_joints[idx], current_q[idx] + joint_velocities[idx] * self.TIME_STEP)
+            
+            # ควบคุมข้อมือแยกอิสระ (Decoupled J5, J6)
+            ratio = (current_loop + 1) / total_loops
+            
+            if override_j5 is not None:
+                self.sim.setJointPosition(self.arm_joints[4], init_j5 + (override_j5 - init_j5) * ratio)
+            else:
+                self.sim.setJointPosition(self.arm_joints[4], current_q[4] + joint_velocities[4] * self.TIME_STEP)
 
-def update(val):
-    angles = [s.val for s in sliders]
-    new_pts = get_joint_positions(*angles)
-    line.set_data(new_pts[:, 0], new_pts[:, 1])
-    line.set_3d_properties(new_pts[:, 2])
-    fig.canvas.draw_idle()
+            if override_j6 is not None:
+                self.sim.setJointPosition(self.arm_joints[5], init_j6 + (override_j6 - init_j6) * ratio)
+            else:
+                self.sim.setJointPosition(self.arm_joints[5], current_q[5] + joint_velocities[5] * self.TIME_STEP)
 
-for s in sliders:
-    s.on_changed(update)
+            self.sim.step()
 
-plt.show()
+    def run_mission(self):
+        """รันลำดับขั้นตอน Pick and Place"""
+        try:
+            self.sim.setStepping(True)
+            self.sim.startSimulation()
+            self.show_telemetry("System Ready / Home")
+
+            # อ่านพิกัดเป้าหมาย (Position) และมุม (Orientation)
+            item_pos = self.sim.getObjectPosition(self.target_cup, self.sim.handle_world)
+            item_ori = self.sim.getObjectOrientation(self.target_cup, self.sim.handle_world)
+            
+            # แปลงมุมจากเรเดียน (Radian) เป็นองศา (Degree) เพื่อให้ดูง่ายขึ้น
+            roll_deg, pitch_deg, yaw_deg = np.degrees(item_ori)
+            
+            # 💡 ปริ้นท์ข้อมูลทั้งหมดสำหรับนำไปใส่ Input Table 1
+            print(f"\n🎯 [Target Acquired]: ข้อมูลแก้วน้ำที่ World Frame (สำหรับตาราง Input Table 1)")
+            print(f"   📍 Position (m)   -> X: {item_pos[0]:+.4f} | Y: {item_pos[1]:+.4f} | Z: {item_pos[2]:+.4f}")
+            print(f"   🔄 Orientation    -> Roll: {item_ori[0]:+.4f} rad ({roll_deg:+.2f}°) | Pitch: {item_ori[1]:+.4f} rad ({pitch_deg:+.2f}°) | Yaw: {item_ori[2]:+.4f} rad ({yaw_deg:+.2f}°)")
+
+
+            # --- Sequence 1: Approach ---
+            print("\n>> 1. Approaching Target...")
+            self.actuate_gripper(1.0)
+            
+            j5_current = self.sim.getJointPosition(self.arm_joints[4])
+            self.drive_tcp_to([item_pos[0], item_pos[1], item_pos[2] + 0.10], override_j5=j5_current + 0.6, move_time=3.0)
+            self.drive_tcp_to([item_pos[0], item_pos[1], item_pos[2] - 0.0785], move_time=1.0)
+            self.show_telemetry("Reached Target")
+
+            # --- Sequence 2: Grasp ---
+            print("\n>> 2. Grasping...")
+            self.actuate_gripper(-1.0)
+            for _ in range(25): self.sim.step()
+        
+            # --- Sequence 3: Lift ---
+            print("\n>> 3. Lifting Payload...")
+            safe_z_height = [item_pos[0], item_pos[1], item_pos[2] + 0.35]
+            self.drive_tcp_to(safe_z_height, move_time=2.0)
+            self.show_telemetry("Payload Lifted")
+
+            # --- Sequence 4: Flip (J6) ---
+            print("\n>> 4. Executing Roll Maneuver (J6)...")
+            j6_current = self.sim.getJointPosition(self.arm_joints[5])
+            j6_target = j6_current + np.pi
+            self.drive_tcp_to(safe_z_height, override_j6=j6_target, move_time=1.5)
+
+            # --- Sequence 5: Tilt (J5) ---
+            print("\n>> 5. Executing Pitch Maneuver (J5)...")
+            j5_current = self.sim.getJointPosition(self.arm_joints[4])
+            j5_target = j5_current - 0.4
+            self.drive_tcp_to(safe_z_height, override_j6=j6_target, override_j5=j5_target, move_time=1.5)
+
+            # --- Sequence 6: Deliver ---
+            print(f"\n>> 6. Moving to Drop Zone: {self.TARGET_DROP_ZONE}")
+            self.drive_tcp_to(self.TARGET_DROP_ZONE, override_j6=j6_target, override_j5=j5_target, move_time=3.0)
+            self.show_telemetry("Arrived at Drop Zone")
+
+            # --- Sequence 7: Release ---
+            print("\n>> 7. Releasing Payload...") 
+            self.actuate_gripper(1.0)
+            for _ in range(40): self.sim.step()
+            self.show_telemetry("Mission Accomplished")
+
+        finally:
+            self.sim.stopSimulation()
+            self.sim.setStepping(False)
+            print("\n🛑 System Offline.")
+
+# =========================================================
+# 🚀 บังคับรันโปรแกรม
+# =========================================================
+if __name__ == "__main__":
+    controller = YaskawaRobot()
+    controller.run_mission()
