@@ -45,21 +45,21 @@ class YaskawaRobot:
         self.sim.setJointTargetVelocity(self.finger_m1, speed)
         self.sim.setJointTargetVelocity(self.finger_m2, speed)
 
-    # def attach_payload(self, is_attached):
-    #     """
-    #     ระบบความปลอดภัยเสริม: เชื่อมต่อวัตถุเข้ากับ End-effector ทางฟิสิกส์
-    #     (ป้องกันวัตถุร่วงหล่นระหว่างการเคลื่อนที่แบบผาดโผน)
-    #     """
-    #     if is_attached:
-    #         self.sim.setObjectInt32Param(self.target_cup, self.sim.shapeintparam_static, 1)
-    #         self.sim.resetDynamicObject(self.target_cup)
-    #         self.sim.setObjectParent(self.target_cup, self.end_effector, True)
-    #         print("🔒 [Payload Status]: SECURED (ผูกแก้วติดกับมือแล้ว)")
-    #     else:
-    #         self.sim.setObjectParent(self.target_cup, -1, True)
-    #         self.sim.setObjectInt32Param(self.target_cup, self.sim.shapeintparam_static, 0)
-    #         self.sim.resetDynamicObject(self.target_cup)
-    #         print("🔓 [Payload Status]: RELEASED (ปลดล็อกฟิสิกส์แก้ว)")
+    def attach_payload(self, is_attached):
+        """
+        ระบบความปลอดภัยเสริม: เชื่อมต่อวัตถุเข้ากับ End-effector ทางฟิสิกส์
+        (ป้องกันวัตถุร่วงหล่นระหว่างการเคลื่อนที่แบบผาดโผน)
+        """
+        if is_attached:
+            self.sim.setObjectInt32Param(self.target_cup, self.sim.shapeintparam_static, 1)
+            self.sim.resetDynamicObject(self.target_cup)
+            self.sim.setObjectParent(self.target_cup, self.end_effector, True)
+            print("🔒 [Payload Status]: SECURED (ผูกแก้วติดกับมือแล้ว)")
+        else:
+            self.sim.setObjectParent(self.target_cup, -1, True)
+            self.sim.setObjectInt32Param(self.target_cup, self.sim.shapeintparam_static, 0)
+            self.sim.resetDynamicObject(self.target_cup)
+            print("🔓 [Payload Status]: RELEASED (ปลดล็อกฟิสิกส์แก้ว)")
 
     def drive_tcp_to(self, goal_xyz, override_j5=None, override_j6=None, move_time=3.0):
         """
@@ -148,7 +148,7 @@ class YaskawaRobot:
             print("\n>> 2. Grasping...")
             self.actuate_gripper(-1.0)
             for _ in range(25): self.sim.step()
-            # self.attach_payload(True) 
+            self.attach_payload(True) 
         
             # --- Sequence 3: Lift ---
             print("\n>> 3. Lifting Payload...")
@@ -175,7 +175,7 @@ class YaskawaRobot:
 
             # --- Sequence 7: Release ---
             print("\n>> 7. Releasing Payload...") 
-            #self.attach_payload(False) 
+            self.attach_payload(False) 
             self.actuate_gripper(1.0)
             for _ in range(40): self.sim.step()
             self.show_telemetry("Mission Accomplished")
